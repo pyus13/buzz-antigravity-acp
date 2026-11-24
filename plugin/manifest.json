@@ -1,0 +1,28 @@
+{
+  "id": "local.gemini-acp",
+  "name": "Gemini (ACP)",
+  "apiVersion": 1,
+  "description": "Run Gemini CLI agents with your own Google account (Google AI Pro or Ultra) instead of an API key, through Gemini CLI's Agent Client Protocol mode.",
+  "discovery": {
+    "category": "agents",
+    "tags": [
+      "code",
+      "coding-agents"
+    ]
+  },
+  "host": {
+    "processes": [
+      {
+        "id": "gemini",
+        "program": "npx",
+        "args": [
+          "--yes",
+          "@google/gemini-cli@0.70.0",
+          "--acp"
+        ]
+      }
+    ],
+    "mcp": true,
+    "files": true
+  }
+}
