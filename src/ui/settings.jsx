@@ -178,7 +178,7 @@ export function SettingsTab({ agent, save, settingsHost, settingsSection, settin
             <Conflict key={field} field={field} latest={latest} draft={draft} resolve={resolve} disabled={saving} />
           ))}
           <div style={stack("var(--space-2)")}>
-            <Field label="Workspace" description="The folder Gemini works in. Use ~/ for your home folder.">
+            <Field label="Workspace" description="The folder Antigravity works in. Use ~/ for your home folder.">
               {(control) => (
                 <Input
                   {...control}

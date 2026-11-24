@@ -13,7 +13,7 @@ import { Select } from "../src/ui/select.jsx";
 import { bindServices } from "../src/ui/services.js";
 import { SettingsTab } from "../src/ui/settings.jsx";
 import { fakeAgents } from "./fake-buzz.js";
-import { fakeGemini, fakeHostFor } from "./fake-gemini.js";
+import { fakeAgy, fakeHostFor } from "./fake-agy.js";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 bindReact(React);
@@ -25,13 +25,14 @@ let runtime;
 let agents;
 const opened = [];
 
-let gemini;
-function services({ signedIn = true, Transcript } = {}) {
-  gemini = fakeGemini();
-  gemini.state.signedIn = signedIn;
+let agy;
+function services({ signedIn = true, Transcript, tier } = {}) {
+  agy = fakeAgy();
+  agy.state.signedIn = signedIn;
+  if (tier) agy.state.tier = tier;
   agents = fakeAgents();
   if (Transcript) agents.ui = { Transcript };
-  runtime = new Runtime({ agents, host: fakeHostFor(gemini), typeKey: "local.gemini-acp/gemini-acp" });
+  runtime = new Runtime({ agents, host: fakeHostFor(agy), typeKey: "local.antigravity-acp/antigravity-acp" });
   bindServices({ runtime, agents, openSetup: () => opened.push("setup") });
 }
 
@@ -170,10 +171,10 @@ describe("SettingsTab", () => {
       textarea.dispatchEvent(new Event("input", { bubbles: true }));
     });
     // Another device changed the model.
-    await render(<SettingsTab agent={agentWith({ ...first, model: "gemini-2.5-flash" }, { settings: "rev2" })} save={save} settingsSection="identity" />);
+    await render(<SettingsTab agent={agentWith({ ...first, model: "claude-opus-4-6-thinking" }, { settings: "rev2" })} save={save} settingsSection="identity" />);
     await settle();
     await act(async () => container.querySelector('button[type="submit"]').click());
-    expect(save).toHaveBeenCalledWith(expect.objectContaining({ instructions: "mine", model: "gemini-2.5-flash" }), { base: { settings: "rev2" } });
+    expect(save).toHaveBeenCalledWith(expect.objectContaining({ instructions: "mine", model: "claude-opus-4-6-thinking" }), { base: { settings: "rev2" } });
   });
 
   it("makes a field changed here and elsewhere a conflict, and holds Save until it's resolved", async () => {
@@ -230,11 +231,17 @@ describe("New agent", () => {
     await settle();
     await settle();
     expect(container.querySelector(".buzz-settings-group #harness")).not.toBeNull();
-    expect(named("Model").textContent).toContain("Auto (Gemini 3)");
+    expect(named("Model").textContent).toContain("Gemini 3.8 Flash");
     expect(ready).toHaveBeenLastCalledWith(true);
+    // Each model's own thinking levels.
+    await act(async () => named("Thinking").click());
+    await settle();
+    expect([...container.querySelectorAll('[role="option"]')].map((option) => option.textContent)).toEqual(
+      expect.arrayContaining(["Low", "Medium", "High"]),
+    );
   });
 
-  it("holds creation until Gemini is signed in", async () => {
+  it("holds creation until Antigravity is signed in", async () => {
     services({ signedIn: false });
     const ready = vi.fn();
     await render(<CreateConfiguration config={readConfig({})} onChange={() => {}} disabled={false} onReadyChange={ready} harnessControl={null} />);
@@ -248,26 +255,41 @@ describe("New agent", () => {
     expect(container.querySelector('[role="alert"]')).toBeNull();
   });
 
-  it("offers Set up beside Harness only while Gemini isn't signed in", async () => {
+  it("offers Set up beside Harness only while Antigravity isn't signed in", async () => {
     services({ signedIn: false });
     await render(<CreateAction disabled={false} />);
     await settle();
     await settle();
     const setUp = [...container.querySelectorAll("button")].find((button) => button.textContent === "Set up");
-    expect(setUp.getAttribute("aria-label")).toBe("Sign in to Gemini");
+    expect(setUp.getAttribute("aria-label")).toBe("Sign in to Antigravity");
     await act(async () => setUp.click());
     expect(opened).toEqual(["setup"]);
   });
 });
 
 describe("Agent setup", () => {
-  it("says how Gemini is signed in", async () => {
+  it("says which plan Antigravity runs on", async () => {
     services();
     await render(<ProviderDialogBody onClose={() => {}} />);
     await settle();
     await settle();
-    expect(container.textContent).toContain("Signed in with your Google account (me@example.com).");
-    expect(container.textContent).toContain("Done");
+    expect(container.textContent).toContain("Signed in with Google · Google AI Pro.");
+    expect(container.textContent).not.toContain("no Google AI Pro or Ultra plan");
+    expect(container.textContent).toContain("Switch account");
+  });
+
+  it("warns when the account has no Pro or Ultra plan, and switches accounts", async () => {
+    services({ tier: { id: "free-tier", name: "Antigravity Starter Quota" } });
+    await render(<ProviderDialogBody onClose={() => {}} />);
+    await settle();
+    await settle();
+    expect(container.textContent).toContain("This Google account has no Google AI Pro or Ultra plan");
+    agy.state.tier = { id: "g1-pro-tier", name: "Google AI Pro" };
+    await act(async () => [...container.querySelectorAll("button")].find((b) => b.textContent.includes("Switch account")).click());
+    await settle();
+    await settle();
+    expect(agy.state.calls.map((call) => call.method)).toEqual(expect.arrayContaining(["logout", "authenticate"]));
+    expect(container.textContent).toContain("Signed in with Google · Google AI Pro.");
   });
 
   it("signs in with Google when signed out", async () => {
@@ -279,8 +301,8 @@ describe("Agent setup", () => {
     await act(async () => [...container.querySelectorAll("button")].find((b) => b.textContent.includes("Sign in with Google")).click());
     await settle();
     await settle();
-    expect(gemini.state.calls.some((call) => call.method === "authenticate")).toBe(true);
-    expect(container.textContent).toContain("Signed in with your Google account");
+    expect(agy.state.calls.some((call) => call.method === "authenticate")).toBe(true);
+    expect(container.textContent).toContain("Signed in with Google");
   });
 
   it("saves a default model and keeps the way back to the dialog", async () => {
@@ -289,12 +311,12 @@ describe("Agent setup", () => {
     await render(<DefaultControl onConfigure={onConfigure} />);
     await settle();
     await settle();
-    await act(async () => named("Gemini (ACP) default model").click());
+    await act(async () => named("Antigravity (ACP) default model").click());
     await settle();
-    const flash = [...container.querySelectorAll('[role="option"]')].find((option) => option.textContent.includes("Flash"));
-    await act(async () => flash.click());
+    const opus = [...container.querySelectorAll('[role="option"]')].find((option) => option.textContent.includes("Opus"));
+    await act(async () => opus.click());
     await settle();
-    expect(runtime.defaults.snapshot().model).toBe("gemini-2.5-flash");
+    expect(runtime.defaults.snapshot().model).toBe("claude-opus-4-6-thinking");
     await act(async () => [...container.querySelectorAll("button")].find((b) => b.textContent === "Edit configuration").click());
     expect(onConfigure).toHaveBeenCalled();
   });
@@ -327,7 +349,7 @@ describe("Activity", () => {
   it("says when there is no session here yet", async () => {
     services();
     await render(<ActivityTab agent={{ key: "agent-1" }} conversation={{ channelId: "c9" }} />);
-    expect(container.textContent).toContain("No Gemini session here yet");
+    expect(container.textContent).toContain("No Antigravity session here yet");
   });
 });
 

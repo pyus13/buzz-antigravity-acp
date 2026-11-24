@@ -1,5 +1,5 @@
 // A stand-in for Buzz's host and an ACP adapter, for tests that exercise the
-// plugin without Buzz or Gemini. `adapter` answers requests by method name.
+// plugin without Buzz or Antigravity. `adapter` answers requests by method name.
 
 export function fakeAdapter(handlers = {}) {
   const sent = [];

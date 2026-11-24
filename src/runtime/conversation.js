@@ -1,134 +1,129 @@
-// One Buzz conversation (a thread, or a whole channel) and the Gemini session
-// that continues it: its turns run one at a time, a message that arrives
-// mid-turn waits for the next turn, and an idle session closes until needed.
-import { errorText, modelsOf, modeNote, modesOf, observationsOf, stepOf } from "../acp/protocol.js";
-import { geminiMode, IDLE_MS, MODES, SESSION_TIMEOUT_MS, TITLE } from "../constants.js";
+// One Buzz conversation (a thread, or a whole channel) and the Antigravity
+// session that continues it: its turns run one at a time, a message that
+// arrives mid-turn is steered into it, and an idle session closes until it
+// is needed.
+import { choicesOf, errorText, observationsOf, optionOf, steerPrompt, stepOf, tierOf } from "../acp/protocol.js";
+import { agentMode, CLOSE_TIMEOUT_MS, IDLE_MS, MODES, START_TIMEOUT_MS, TITLE } from "../constants.js";
 import { sessionShape } from "../config.js";
 
 export const STOPPED = Object.freeze({ ok: true, stopped: true });
 /** How long a reset waits for a cancelled turn to end before closing. */
 const SETTLE_MS = 5_000;
-const SUMMARY_LIMIT = 40_000;
 const EVENT_ID = /\b[0-9a-f]{64}\b/;
 const MESSAGE_TOOLS = new Set(["send", "reply_in_subthread"]);
+/** Told with each turn in Plan, where Buzz declines anything that would
+ * change something: Antigravity's own plan mode doesn't post its plan. */
+export const PLAN_NOTE = `<plan-mode>
+You are in plan mode. Research and plan only: read files and search, but don't create, edit, move or delete files or run commands that change anything; Buzz declines them. When your plan is ready, post it with Buzz's send tool.
+</plan-mode>`;
+/** Sent when a turn in Plan ended on a declined tool with no plan posted:
+ * Antigravity ends a turn when a tool is declined. */
+export const PLAN_NUDGE = `<plan-mode>
+That was declined: you are in plan mode, and nothing may change. Don't try it again. Post your plan now with Buzz's send tool.
+</plan-mode>`;
+/** A turn's prompt text, with the plan note in Plan. */
+export const turnText = (text, mode) => (mode === "plan" ? `${text}\n\n${PLAN_NOTE}` : text);
+/** Updates that come with a session, not from a turn Antigravity began. */
+const AMBIENT = new Set(["available_commands_update", "current_mode_update", "config_option_update", "usage_update"]);
 
-/** Asked of Gemini to compact a session: its answer opens the next one. */
-export const COMPACT_PROMPT = `Your context is being compacted: this session ends here, and a new session continues it from your summary alone.
-
-Write that summary now, for yourself. Include who you are working with and what they asked, the decisions made, the work done (files, commands and their results), where things stand, and every open task or promise. Be concise but leave out nothing you will need.
-
-Do not call any tools. Answer with the summary only.`;
-
-/** The `session/new` and `session/load` parameters for a session in `cwd`
- * whose Buzz tools `mcp` serves. */
-export function sessionParams(cwd, mcp) {
+/** The `session/new` and `session/resume` parameters for a session in `cwd`
+ * whose Buzz tools `mcp` serves, with Buzz's system prompt after
+ * Antigravity's own. */
+export function sessionParams(cwd, mcp, system) {
   return {
     cwd,
     mcpServers: [{ type: "http", name: "buzz", url: mcp.url, headers: mcp.headers.map((header) => ({ ...header })) }],
+    ...(system ? { _meta: { antigravity: { systemPrompt: { append: system } } } } : {}),
   };
 }
 
-/** A session's model and approval mode, from its `session/new` or
- * `session/load` answer. Its first model is its default: the one a turn
- * that picks none goes back to. */
-export function sessionState(answer) {
-  const models = modelsOf(answer);
-  const modes = modesOf(answer);
-  return {
-    model: models.current,
-    defaultModel: models.current,
-    models: models.choices.map((choice) => choice.value),
-    names: Object.fromEntries(models.choices.map((choice) => [choice.value, choice.name])),
-    mode: modes.current,
-    modes: modes.ids,
-  };
+/** Sets a session's options where they differ from `wanted`
+ * (`[category, value, synced]`). An option the session lacks, or a value it
+ * does not offer, is left alone, except a synced one, which stops the turn
+ * (NIP-AP: never replace a synced setting with a default). Returns the
+ * session's options after. */
+export async function applyOptions(connection, sessionId, configOptions, wanted) {
+  let options = configOptions;
+  for (const [category, value, synced] of wanted) {
+    const option = optionOf(options, category);
+    if (!option || !value || option.currentValue === value) continue;
+    if (!choicesOf(option.options).some((choice) => choice.value === value)) {
+      if (synced)
+        throw new Error(
+          `This agent's synced ${category === "thought_level" ? "thinking" : category} "${value}" isn't offered by ${TITLE}. Change it in Settings.`,
+        );
+      continue;
+    }
+    const changed = await connection.request(
+      "session/set_config_option",
+      { sessionId, configId: option.id, value },
+      START_TIMEOUT_MS,
+    );
+    options = Array.isArray(changed?.configOptions)
+      ? changed.configOptions
+      : options.map((item) => (item.id === option.id ? { ...item, currentValue: value } : item));
+  }
+  return options;
 }
 
-/** Sets a session's approval mode and model where they differ from `wanted`
- * (`{ mode: [id, synced], model: [id, synced] }`, a blank model being the
- * session's default). A value the session does not offer is left alone,
- * except a synced one, which stops the turn (NIP-AP: never replace a synced
- * setting with a default). Returns the session's state after. */
-export async function applySettings(connection, sessionId, state, wanted) {
-  const next = { ...state };
-  const [mode, modeSynced] = wanted.mode;
-  if (mode && next.mode !== mode) {
-    if (next.modes.length && !next.modes.includes(mode)) {
-      if (modeSynced)
-        throw new Error(`This agent's synced permissions "${mode}" aren't offered by ${TITLE}. Change them in Settings.`);
-    } else {
-      await connection.request("session/set_mode", { sessionId, modeId: mode }, SESSION_TIMEOUT_MS);
-      next.mode = mode;
-    }
-  }
-  const [picked, modelSynced] = wanted.model;
-  const model = picked || next.defaultModel;
-  if (model && next.model !== model) {
-    if (next.models.length && !next.models.includes(model)) {
-      if (modelSynced)
-        throw new Error(`This agent's synced model "${model}" isn't offered by ${TITLE}. Change it in Settings.`);
-    } else {
-      await connection.request("session/set_model", { sessionId, modelId: model }, SESSION_TIMEOUT_MS);
-      next.model = model;
-    }
-  }
-  return next;
-}
-
-/** What a turn runs with: a per-message pick, else the agent's own setting,
- * else this device's default, else the session's own. Only a value the
- * agent's synced settings chose counts as synced. */
-export function wantedSettings(delivery, settings, defaults) {
+/** The options a turn runs with: a per-message pick, else the agent's own
+ * setting, else this device's default, else the session's own. Only a value
+ * the agent's synced settings chose counts as synced. */
+export function wantedOptions(delivery, settings, defaults, session = {}) {
   const synced = delivery.synced ?? {};
-  const effective = defaults.effective(settings).model;
-  return {
-    mode: [geminiMode(settings.mode), "mode" in synced],
-    model: [
-      delivery.model || (effective === "default" ? "" : effective),
-      !delivery.model && Boolean(settings.model) && "model" in synced,
-    ],
-  };
+  const effective = defaults.effective(settings);
+  const model = delivery.model || (effective.model === "default" ? session.model : effective.model);
+  const effort = delivery.effort || (delivery.model ? "" : effective.effort === "default" ? "" : effective.effort);
+  return [
+    ["mode", agentMode(settings.mode), "mode" in synced],
+    ["model", model, !delivery.model && Boolean(settings.model) && "model" in synced],
+    // A model takes the thinking level asked for, else the one it started on.
+    ["thought_level", effort || session.effort, !delivery.effort && Boolean(settings.effort) && "effort" in synced],
+  ];
 }
 
 /** What a turn's `stopReason` means for Buzz. */
 export function outcomeOf(stopReason) {
   if (stopReason === "cancelled") return STOPPED;
-  if (stopReason === "refusal") return { ok: false, error: "Gemini declined to continue this turn." };
+  if (stopReason === "refusal") return { ok: false, error: "Antigravity declined to continue this turn." };
   if (stopReason === "max_tokens")
-    return { ok: false, error: "Gemini's context window is full. Compact the session or start a new one." };
-  if (stopReason === "max_turn_requests")
-    return { ok: false, error: "Gemini stopped this turn: it detected a loop or reached its turn limit." };
+    return { ok: false, error: "Antigravity's context window is full. Compact the session or start a new one." };
+  if (stopReason === "max_turn_requests") return { ok: false, error: "Antigravity stopped this turn: it reached its turn limit." };
   return { ok: true };
 }
 
 const transcriptOutcome = (result) => (result.stopped ? "stopped" : result.ok ? "ended" : "error");
 
 /** Whether a failed prompt left the session unusable, so the next turn should
- * open it again. */
+ * open it again (Antigravity resumes it from its own history). */
 const sessionLost = (error, connection) =>
-  Boolean(connection?.closed) || /session not found|unknown session|exited unexpectedly/i.test(errorText(error));
+  Boolean(connection?.closed) || /session has ended|exited unexpectedly|not found|unknown session|no such session/i.test(errorText(error));
 
-/** Whether `session/load` failed because Gemini no longer has the session. */
-const sessionGone = (error) =>
-  /not found|no previous sessions|invalid session identifier|no such file|enoent/i.test(errorText(error));
-
-/** Updates that come with a session, not from a turn Gemini began. */
-const AMBIENT = new Set(["available_commands_update", "current_mode_update", "config_option_update"]);
+/** Whether `session/resume` failed because Antigravity no longer has it. */
+const sessionGone = (error) => error?.code === -32002 || /not found|unknown session|no such session|does not exist/i.test(errorText(error));
 
 class Turn {
   constructor(delivery, { compacting = false } = {}) {
-    this.delivery = delivery;
+    this.receipts = delivery ? [delivery] : [];
     this.compacting = compacting;
-    /** Whether the session reported anything, so the turn began in Gemini. */
+    /** Whether the session reported anything, so the turn began. */
     this.updated = false;
+    this.named = false;
     this.step = "";
-    /** What a compaction's summary says so far. */
-    this.text = "";
-    /** Its transcript record. */
+    /** Whether a message was posted, and whether Buzz declined a tool. */
+    this.posted = false;
+    this.declined = false;
+    /** The prompt request the turn ends with: a steered message's, once one
+     * joins it, as Antigravity then answers the earlier one at once. */
+    this.request = undefined;
     this.record = undefined;
     this.done = new Promise((resolve) => {
       this.finish = resolve;
     });
+  }
+
+  get latest() {
+    return this.receipts.at(-1);
   }
 }
 
@@ -136,24 +131,23 @@ export class Conversation {
   constructor(agent, key, record) {
     this.agent = agent;
     this.key = key;
-    /** `{ sessionId, cursor?, shape?, whole?, primed?, summary?, compacted?,
-     * where?, at }`, or undefined: no session. */
+    /** `{ sessionId, cursor?, shape?, whole?, where?, at }`, or undefined. */
     this.record = record;
     this.connection = undefined;
     this.live = false;
-    /** The session's model and approval mode. */
-    this.state = undefined;
+    this.options = undefined;
+    /** The model and thinking level the session started on: its defaults. */
+    this.started = {};
     this.mcp = undefined;
     this.handler = undefined;
     this.unsubscribe = undefined;
-    /** Buzz's system prompt for the session, shown with its first turn. */
-    this.system = undefined;
-    /** The turn Gemini is running, or a compaction. */
+    /** The turn Antigravity is running, or a compaction. */
     this.turn = undefined;
     /** The queued item being prepared to run, until its turn starts. */
     this.starting = undefined;
     this.queue = [];
     this.pumping = false;
+    this.steering = Promise.resolve();
     this.idleTimer = undefined;
     /** The permission mode the session runs in, for its permission prompts. */
     this.mode = undefined;
@@ -177,12 +171,13 @@ export class Conversation {
 
   // --- deliveries
 
-  /** Runs a mention or wake in this conversation as its next turn. Gemini
-   * CLI can't take a message into a running turn, so one that arrives while
-   * Gemini works waits for the turn to end. */
+  /** Runs a mention or wake in this conversation: steered into the running
+   * turn when it can be, else queued as the next turn. */
   async deliver(delivery, conversation, settings) {
     this.used = Date.now();
     this.wholeNow = conversation.key === conversation.channel;
+    if (typeof conversation.where === "string") this.where = conversation.where;
+    if (await this.trySteer(delivery, conversation)) return;
     const item = { delivery, conversation, settings, stopped: false };
     item.done = new Promise((resolve) => {
       item.resolve = resolve;
@@ -192,6 +187,49 @@ export class Conversation {
     delivery.interruptible?.(async () => this.stop(item));
     this.agent.changed();
     void this.pump();
+  }
+
+  /** Steers one message at a time, so each sees the last one's cursor. */
+  trySteer(delivery, conversation) {
+    const attempt = this.steering.then(() => this.steer(delivery, conversation));
+    this.steering = attempt.catch(() => false);
+    return attempt;
+  }
+
+  /** Antigravity takes a prompt sent while a turn runs into that turn, and
+   * answers the turn's earlier prompt at once: the turn then ends with this
+   * one's answer. */
+  async steer(delivery, conversation) {
+    const turn = this.turn;
+    // A message that picks another model or level runs as its own turn.
+    if (!turn?.request || turn.compacting || !this.live || !this.connection.canSteer || delivery.model || delivery.effort)
+      return false;
+    let prompt;
+    try {
+      prompt = await this.agent.kit.turnPrompt(delivery, conversation, this.cursorOption());
+    } catch (error) {
+      console.warn("antigravity-acp: could not build a steered prompt", error);
+      return false;
+    }
+    if (this.turn !== turn || !this.live) {
+      prompt.restore();
+      return false;
+    }
+    const text = turnText(steerPrompt(prompt.text), this.mode);
+    turn.request = this.connection.request("session/prompt", {
+      sessionId: this.record.sessionId,
+      prompt: [{ type: "text", text }],
+    });
+    this.record.cursor = prompt.cursor;
+    this.save();
+    turn.record?.prompt(delivery, text, true);
+    turn.latest?.superseded?.();
+    turn.receipts.push(delivery);
+    turn.step = "";
+    delivery.acknowledged?.();
+    delivery.workingUntil(turn.done);
+    delivery.interruptible?.(async () => this.stop());
+    return true;
   }
 
   async pump() {
@@ -226,79 +264,87 @@ export class Conversation {
     }
   }
 
+  /** Waits for the turn's last prompt, and records the token use of each. */
+  async settle(turn, conversation) {
+    for (;;) {
+      const request = turn.request;
+      const answer = await request;
+      void this.agent.recordUsage({
+        sessionId: this.record?.sessionId,
+        channelId: conversation?.channel,
+        root: conversation?.root,
+        observations: observationsOf(answer, optionOf(this.options, "model")?.currentValue),
+      });
+      if (turn.request === request) return answer;
+    }
+  }
+
   async runTurn(item, retried = false) {
     const { delivery, conversation, settings } = item;
     await this.open(delivery, conversation, settings);
     if (item.stopped) return STOPPED;
-    this.state = await applySettings(
+    this.options = await applyOptions(
       this.connection,
       this.record.sessionId,
-      this.state,
-      wantedSettings(delivery, settings, this.agent.defaults),
+      this.options,
+      wantedOptions(delivery, settings, this.agent.defaults, this.started),
     );
     this.mode = settings.mode;
     if (item.stopped) return STOPPED;
-    const before = { cursor: this.record.cursor, primed: this.record.primed, summary: this.record.summary };
+    const before = this.record.cursor;
     const prompt = await this.agent.kit.turnPrompt(delivery, conversation, this.cursorOption());
     if (item.stopped) {
       prompt.restore();
       return STOPPED;
     }
-    // Gemini CLI takes no system prompt of its own over ACP: a session is
-    // shown Buzz's with its first turn, and a compacted one's summary with it.
-    const system = this.record.primed ? undefined : this.system;
-    const summary = this.record.summary;
-    const text = [
-      system,
-      summary && `<previous-session-summary>\n${summary}\n</previous-session-summary>`,
-      prompt.text,
-    ]
-      .filter(Boolean)
-      .join("\n\n");
     const turn = new Turn(delivery);
     const { connection } = this;
-    const sessionId = this.record.sessionId;
     turn.record = await this.agent.transcripts.begin(this.agent.key, this.key, {
-      sessionId,
-      newSession: !this.record.primed,
+      sessionId: this.record.sessionId,
+      newSession: Boolean(this.fresh),
       channelId: conversation.channel,
       root: conversation.root,
       delivery,
-      system,
-      prompt: summary ? `<previous-session-summary>\n${summary}\n</previous-session-summary>\n\n${prompt.text}` : prompt.text,
+      system: this.fresh ? this.system : undefined,
+      prompt: prompt.text,
       config: this.configLabels(),
     });
+    this.fresh = false;
     this.turn = turn;
     this.starting = undefined;
     this.agent.changed();
     let result;
     try {
-      const sent = connection.request("session/prompt", { sessionId, prompt: [{ type: "text", text }] });
+      turn.request = connection.request("session/prompt", {
+        sessionId: this.record.sessionId,
+        prompt: [{ type: "text", text: turnText(prompt.text, settings.mode) }],
+      });
       // Saved once sent: the session has been shown it.
       this.record.cursor = prompt.cursor;
-      this.record.primed = true;
-      delete this.record.summary;
       this.save();
       delivery.acknowledged?.();
-      const answer = await sent;
+      let answer = await this.settle(turn, conversation);
+      // A plan that ended on a declined tool is asked for, once.
+      if (settings.mode === "plan" && answer?.stopReason === "end_turn" && turn.declined && !turn.posted && this.live) {
+        turn.declined = false;
+        turn.record.prompt(delivery, PLAN_NUDGE, true);
+        turn.request = connection.request("session/prompt", {
+          sessionId: this.record.sessionId,
+          prompt: [{ type: "text", text: PLAN_NUDGE }],
+        });
+        answer = await this.settle(turn, conversation);
+      }
       result = outcomeOf(answer?.stopReason);
-      void this.agent.recordUsage({
-        sessionId,
-        channelId: conversation.channel,
-        root: conversation.root,
-        observations: observationsOf(answer, this.state?.model),
-      });
     } catch (error) {
-      if (!turn.updated && this.record) {
-        // Gemini never began: the next prompt shows the same messages.
+      if (!turn.updated) {
+        // Antigravity never began: the next prompt shows the same messages.
         prompt.restore();
-        Object.assign(this.record, before);
-        if (before.summary === undefined) delete this.record.summary;
+        if (this.record) this.record.cursor = before;
       }
       if (sessionLost(error, connection)) this.lose();
       if (this.agent.disposed || connection.stopped) result = STOPPED;
-      // Once: a session Gemini lost before it began is opened again.
-      else if (!turn.updated && !retried && sessionLost(error, connection)) {
+      // Once, and only for its own message: one steered into it would be lost.
+      else if (!turn.updated && !retried && turn.receipts.length === 1 && sessionLost(error, connection)) {
         this.turn = undefined;
         this.starting = item;
         turn.record.end({ outcome: "error", error: `${errorText(error)} (retrying)` });
@@ -320,24 +366,27 @@ export class Conversation {
     return this.record?.cursor ? { cursor: this.record.cursor } : undefined;
   }
 
-  /** The model and permissions a turn ran with, as its transcript shows them. */
+  /** The model, thinking and permissions a turn runs with, as its
+   * transcript shows them. */
   configLabels() {
-    const model = this.state?.model;
-    const mode = MODES.find(([, , , id]) => id === this.state?.mode)?.[1];
-    return [model && (this.state?.names?.[model] ?? this.agent.modelLabel(model)), mode].filter(Boolean);
+    const named = (category) => {
+      const option = optionOf(this.options, category);
+      return choicesOf(option?.options).find((choice) => choice.value === option?.currentValue)?.name;
+    };
+    const mode = MODES.find(([id]) => id === this.mode)?.[1];
+    return [named("model"), named("thought_level") && `${named("thought_level")} thinking`, mode].filter(Boolean);
   }
 
-  // --- the Gemini session
+  // --- the Antigravity session
 
-  /** Makes the session live for this turn: reuses it, loads it, or starts a
-   * new one, each with a fresh MCP server (a server takes one MCP session, so
-   * every new or loaded Gemini session needs its own). */
+  /** Makes the session live for this turn: reuses it, resumes it, or starts
+   * a new one, each with a fresh MCP server (a server takes one MCP
+   * session, so every new or resumed Antigravity session needs its own). */
   async open(delivery, conversation, settings) {
     const agentHandle = delivery.agent;
     const connection = await this.agent.connect(agentHandle, settings);
     const cwd = await this.agent.workspace(settings);
     this.handler = this.agent.tools(agentHandle, conversation, cwd);
-    if (typeof conversation.where === "string") this.where = conversation.where;
     const shape = sessionShape(settings);
     if (this.live && this.connection === connection && this.record?.shape === shape) {
       this.agent.opened(this); // Most recently used.
@@ -369,35 +418,36 @@ export class Conversation {
       cwd,
       instructions: settings.instructions,
     });
-    const params = sessionParams(cwd, mcp);
+    const params = sessionParams(cwd, mcp, this.system);
     let opened;
-    if (this.record?.sessionId && !this.record.compacted && connection.canLoad)
+    if (this.record?.sessionId && connection.sessionCapabilities.resume)
       opened = await connection
-        .request("session/load", { sessionId: this.record.sessionId, ...params }, SESSION_TIMEOUT_MS)
+        .request("session/resume", { sessionId: this.record.sessionId, ...params }, START_TIMEOUT_MS)
         .catch((error) => {
-          // Only a session Gemini no longer has is given up; anything else
-          // (a crash, a timeout) fails this turn and keeps it for the next.
+          // Only a session Antigravity no longer has is given up; anything
+          // else (a crash, a timeout) fails this turn and keeps it for the next.
           if (connection.closed || !sessionGone(error)) throw error;
-          console.warn("gemini-acp: the saved session is gone; starting a new one", error);
+          console.warn("antigravity-acp: the saved session is gone; starting a new one", error);
           return undefined;
         });
-    if (opened) {
-      // Saved before this harness kept the mark: it was shown its first turn.
-      if (this.record.primed === undefined) this.record.primed = true;
-    } else {
-      // A compacted session carries on from what it was shown and its summary.
-      const carried = this.record?.compacted
-        ? { ...(this.record.cursor ? { cursor: this.record.cursor } : {}), summary: this.record.summary }
-        : {};
+    this.fresh = !opened;
+    if (!opened) {
       if (this.record) this.forget();
-      opened = await connection.request("session/new", params, SESSION_TIMEOUT_MS);
-      this.record = { sessionId: opened.sessionId, at: Date.now(), primed: false, ...carried };
+      opened = await connection.request("session/new", params, START_TIMEOUT_MS);
+      // A new session has been shown nothing yet.
+      this.record = { sessionId: opened.sessionId, at: Date.now() };
     }
+    const tier = tierOf(opened);
+    if (tier) this.agent.runtime.catalog.sawTier(tier);
     this.record.shape = shape;
     this.record.whole = this.whole;
     if (this.where) this.record.where = this.where;
     this.connection = connection;
-    this.state = sessionState(opened);
+    this.options = opened.configOptions;
+    this.started = {
+      model: optionOf(this.options, "model")?.currentValue,
+      effort: optionOf(this.options, "thought_level")?.currentValue,
+    };
     this.unsubscribe = connection.onSession(this.record.sessionId, (update) => this.update(update));
     this.live = true;
     this.save();
@@ -419,6 +469,7 @@ export class Conversation {
     return answer.then((reply) => {
       const result = reply?.result;
       if (!reply?.error && !result?.isError) {
+        if (this.turn) this.turn.posted = true;
         const said = (Array.isArray(result?.content) ? result.content : []).map((part) => part?.text ?? "").join("\n");
         record.posted(call.arguments?.text, EVENT_ID.exec(said)?.[0]);
       }
@@ -427,27 +478,34 @@ export class Conversation {
   }
 
   update(update) {
+    if (update.sessionUpdate === "config_option_update" && Array.isArray(update.configOptions)) {
+      this.options = update.configOptions;
+      return;
+    }
     const turn = this.turn;
-    if (!turn || AMBIENT.has(update?.sessionUpdate)) return;
-    turn.updated = true;
+    if (!turn) return;
     turn.record?.update(update);
-    if (turn.compacting) {
-      if (update.sessionUpdate === "agent_message_chunk" && update.content?.type === "text" && !modeNote(update)) {
-        if (update._meta?.reset) turn.text = "";
-        turn.text += update.content.text;
+    if (AMBIENT.has(update.sessionUpdate)) return;
+    turn.updated = true;
+    if (update.sessionUpdate === "session_info_update") {
+      if (typeof update.title === "string" && update.title && !turn.named) {
+        turn.named = true;
+        for (const receipt of turn.receipts) receipt.named?.(update.title);
       }
       return;
     }
+    if (turn.compacting) return;
     const step = stepOf(update);
     if (!step) return;
     const label = `${step.tool}\u0000${step.target ?? ""}`;
     if (label === turn.step) return;
     turn.step = label;
-    turn.delivery?.step?.(step.tool, step.target);
+    turn.latest?.step?.(step.tool, step.target);
   }
 
-  /** The session can't be used as it is: the next turn opens it again. */
-  lose() {
+  /** The session can't be used as it is: the next turn opens it again.
+   * With `keep`, the process is left running for a close still to send. */
+  lose(keep = false) {
     this.live = false;
     this.unsubscribe?.();
     this.unsubscribe = undefined;
@@ -455,15 +513,19 @@ export class Conversation {
     this.mcp = undefined;
     void mcp?.close().catch(() => {});
     this.agent.closed(this);
-    if (!this.busy) this.agent.idle();
+    if (!keep && !this.busy) this.agent.idle();
   }
 
-  /** Closes the session's MCP server, keeping the record so the next turn
-   * loads the session again. Gemini CLI has no way to close one session; it
-   * is let go of, and goes with its process once the agent is idle. */
+  /** Closes the session and its MCP server, keeping the record so the next
+   * turn resumes it. */
   async close() {
     clearTimeout(this.idleTimer);
-    this.lose();
+    const { connection, live } = this;
+    const sessionId = this.record?.sessionId;
+    this.lose(true);
+    if (live && sessionId && connection && !connection.closed && connection.sessionCapabilities.close)
+      await connection.request("session/close", { sessionId }, CLOSE_TIMEOUT_MS).catch(() => {});
+    if (!this.busy) this.agent.idle();
   }
 
   /** Forgets the session: the next turn starts a new one. Its transcript
@@ -499,7 +561,7 @@ export class Conversation {
       }
     }
     if (this.starting && (!item || this.starting === item)) this.starting.stopped = true;
-    if (item && this.turn && this.turn.delivery !== item.delivery) return;
+    if (item && this.turn && !this.turn.receipts.includes(item.delivery)) return;
     if (this.turn && this.record && this.connection && !this.connection.closed)
       this.connection.notify("session/cancel", { sessionId: this.record.sessionId });
   }
@@ -514,7 +576,7 @@ export class Conversation {
   /** Ends the session for good; the next message starts a new one. */
   async reset() {
     // A turn running or still opening its session ends first, so the session
-    // is not forgotten underneath it.
+    // is not closed and forgotten underneath it.
     const pending = [this.turn?.done, this.starting?.done].filter(Boolean);
     this.interrupt();
     if (pending.length)
@@ -525,56 +587,33 @@ export class Conversation {
     this.agent.idle();
   }
 
-  /** Compacts the session: Gemini CLI has no compaction a client can ask
-   * for, so Gemini summarizes the session, and the next message starts a new
-   * session from that summary, shown no message twice. */
+  /** Compacts the session's history to free context, with Antigravity's own
+   * `/compact`. */
   async compact() {
     if (this.busy) throw new Error("Wait for the active turn to finish first.");
-    if (!this.record) throw new Error("This conversation has no Gemini session yet.");
+    if (!this.record) throw new Error("This conversation has no Antigravity session yet.");
     if (!this.live)
-      throw new Error("This conversation's Gemini session is closed. It opens again with the next message.");
+      throw new Error("This conversation's Antigravity session is closed. It opens again with the next message.");
     const turn = new Turn(undefined, { compacting: true });
-    const { connection } = this;
-    const { sessionId } = this.record;
     const [channelId, root] = this.key.split("/");
     turn.record = await this.agent.transcripts.begin(this.agent.key, this.key, {
-      sessionId,
+      sessionId: this.record.sessionId,
       newSession: false,
       channelId,
       root,
       config: this.configLabels(),
     });
-    turn.record.status("Compacting: Gemini summarizes this session, and the next message starts a new one from the summary.");
+    turn.record.status("Compacting the session to free context.");
     this.turn = turn;
-    // The session's Buzz tools post nothing while it summarizes.
-    this.handler = undefined;
     this.agent.changed();
     try {
-      const answer = await connection.request("session/prompt", {
-        sessionId,
-        prompt: [{ type: "text", text: COMPACT_PROMPT }],
+      turn.request = this.connection.request("session/prompt", {
+        sessionId: this.record.sessionId,
+        prompt: [{ type: "text", text: "/compact" }],
       });
-      const outcome = outcomeOf(answer?.stopReason);
-      void this.agent.recordUsage({ sessionId, channelId, root, observations: observationsOf(answer, this.state?.model) });
-      if (outcome.stopped || !outcome.ok) {
-        turn.record.end({ outcome: transcriptOutcome(outcome), error: outcome.error });
-        turn.finish(outcome);
-        if (outcome.error) throw new Error(outcome.error);
-        return;
-      }
-      const summary = turn.text.trim();
-      if (!summary) throw new Error("Gemini returned no summary, so the session was kept.");
-      await this.close();
-      this.record = {
-        ...this.record,
-        compacted: true,
-        primed: false,
-        summary: summary.length > SUMMARY_LIMIT ? `${summary.slice(0, SUMMARY_LIMIT - 1)}…` : summary,
-        at: Date.now(),
-      };
-      this.save();
-      turn.record.end({ outcome: "ended" });
-      turn.finish({ ok: true });
+      const outcome = outcomeOf((await this.settle(turn, { channel: channelId, root }))?.stopReason);
+      turn.record.end({ outcome: transcriptOutcome(outcome), error: outcome.error });
+      turn.finish(outcome);
     } catch (error) {
       turn.record.end({ outcome: "error", error: errorText(error) });
       turn.finish({ ok: false, error: errorText(error) });
@@ -583,7 +622,6 @@ export class Conversation {
       if (this.turn === turn) this.turn = undefined;
       this.agent.changed();
       void this.pump();
-      this.agent.idle();
     }
   }
 

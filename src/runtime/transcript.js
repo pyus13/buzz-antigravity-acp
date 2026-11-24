@@ -1,10 +1,10 @@
 // Each conversation's transcript, as Buzz's own transcript view shows it
 // (`agents.ui.Transcript`): the turns this harness ran, recorded from what
-// Gemini reported while they ran, and kept on this device.
+// Antigravity reported while they ran, and kept on this device.
 //
-// Gemini CLI's ACP mode has no way to read a session's history without
-// opening it again, so the transcript is kept as it happens instead.
-import { buzzToolOf, modeNote, promptSections, toolNameOf } from "../acp/protocol.js";
+// Antigravity keeps its sessions in its own store, which a client can't read,
+// so the transcript is kept as it happens instead.
+import { buzzToolOf, promptSections, toolNameOf } from "../acp/protocol.js";
 import { TRANSCRIPT_TURNS } from "../constants.js";
 
 const VERSION = 1;
@@ -18,12 +18,15 @@ const EVENT_ID = /^[0-9a-f]{64}$/;
 const clip = (text, limit = TEXT_LIMIT) =>
   typeof text !== "string" ? "" : text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
 
-/** The text of ACP tool call content, and its file diffs. */
-function contentOf(content) {
+/** The text of ACP tool call content (or Antigravity's raw output), and its
+ * file diffs. */
+function contentOf(content, rawOutput) {
   const texts = [];
   const diffs = [];
+  if (typeof rawOutput?.output === "string") texts.push(rawOutput.output);
+  else if (typeof rawOutput === "string") texts.push(rawOutput);
   for (const part of Array.isArray(content) ? content : []) {
-    if (part?.type === "content" && part.content?.type === "text") texts.push(part.content.text);
+    if (part?.type === "content" && part.content?.type === "text" && !texts.includes(part.content.text)) texts.push(part.content.text);
     if (part?.type === "diff" && typeof part.path === "string")
       diffs.push({
         path: part.path,
@@ -116,7 +119,7 @@ export class TranscriptStore {
     if (!held) return;
     await this.store
       .set(key, JSON.stringify({ v: VERSION, turns: held.turns }))
-      .catch((error) => console.warn("gemini-acp: could not save a transcript", error));
+      .catch((error) => console.warn("antigravity-acp: could not save a transcript", error));
   }
 
   /** Forgets a conversation's transcript. */
@@ -163,6 +166,11 @@ export class TurnRecord {
       this.add({ type: "prompt", ...askedBy(delivery, prompt), sections: promptSections(prompt), steer: false });
   }
 
+  /** A message steered into the turn. */
+  prompt(delivery, text, steer) {
+    this.add({ type: "prompt", ...askedBy(delivery, text), sections: promptSections(text), steer });
+  }
+
   add(item) {
     if (this.value.items.length >= ITEM_LIMIT) return undefined;
     const full = { id: `i${++this.next}`, at: Date.now(), ...item };
@@ -184,7 +192,7 @@ export class TurnRecord {
       case "agent_message_chunk":
       case "agent_thought_chunk": {
         const text = update.content?.type === "text" ? update.content.text : "";
-        if (!text || modeNote(update)) return;
+        if (!text) return;
         const type = update.sessionUpdate === "agent_message_chunk" ? "message" : "thought";
         // A retried response starts its text over.
         if (update._meta?.reset && this.open?.type === type) this.replace(this.open.id, () => ({ text: "" }));
@@ -203,7 +211,7 @@ export class TurnRecord {
         const callId = typeof update.toolCallId === "string" ? update.toolCallId : "";
         // Buzz's message tools show as the messages they post (`posted`).
         if (buzzToolMessage(update)) return;
-        const { text, diffs } = contentOf(update.content);
+        const { text, diffs } = contentOf(update.content, update.rawOutput);
         const paths = Array.isArray(update.locations)
           ? update.locations.map((location) => location?.path).filter((path) => typeof path === "string")
           : undefined;
@@ -218,7 +226,7 @@ export class TurnRecord {
             title: clip(typeof update.title === "string" && update.title ? update.title : (name ?? "Tool"), 400),
             kind: typeof update.kind === "string" ? update.kind : "other",
             status: status ?? "in_progress",
-            input: name && buzzToolOf(name) ? `buzz ${buzzToolOf(name)}` : (name ?? ""),
+            input: inputOf(update),
             output: clip(text, OUTPUT_LIMIT),
             diffs,
             paths: paths ?? [],
@@ -288,6 +296,16 @@ export class TurnRecord {
 
 /** Whether an update is about one of Buzz's message tools. */
 function buzzToolMessage(update) {
-  const tool = buzzToolOf(toolNameOf(update));
+  const tool = buzzToolOf(update);
   return tool === "send" || tool === "reply_in_subthread";
+}
+
+/** A tool's input as the transcript shows it: its name and arguments. */
+function inputOf(update) {
+  const name = toolNameOf(update) ?? "";
+  const input = update.rawInput && typeof update.rawInput === "object" ? update.rawInput : undefined;
+  if (!input) return name;
+  const { toolSummary, ...rest } = input;
+  void toolSummary;
+  return clip(`${name}${name ? " " : ""}${JSON.stringify(rest, null, 2)}`, OUTPUT_LIMIT);
 }

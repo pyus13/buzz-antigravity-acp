@@ -1,49 +1,30 @@
-// One Gemini CLI process in its ACP mode (the manifest's `npx` command) and
-// its JSON-RPC connection: newline-delimited messages over stdio, as the Agent
+// One Antigravity CLI process (`agy acp`, the manifest's process) and its
+// JSON-RPC connection: newline-delimited messages over stdio, as the Agent
 // Client Protocol defines them.
-import { ADAPTER_ENV, GOOGLE_LOGIN, NODE_REQUIRED, PROCESS, START_TIMEOUT_MS, STDERR_LIMIT, TITLE } from "../constants.js";
+import { ADAPTER_ENV, GOOGLE_LOGIN, INSTALL_COMMAND, PROCESS, START_TIMEOUT_MS, STDERR_LIMIT, TITLE } from "../constants.js";
 import { errorText, lastLines, permissionAnswer } from "./protocol.js";
 
 /* global __VERSION__ */
-const CLIENT_INFO = { name: "buzz-gemini-acp", version: typeof __VERSION__ === "string" ? __VERSION__ : "dev" };
-
-/** npm could not find the pinned version in its cached package list: the
- * cache predates that release, so ask the registry. */
-const STALE_CACHE = /ETARGET|notarget|No matching version/;
-/** npm could not reach the registry. */
-const OFFLINE = /ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENETUNREACH|network/i;
+const CLIENT_INFO = { name: "buzz-antigravity-acp", version: typeof __VERSION__ === "string" ? __VERSION__ : "dev" };
 
 export class AcpConnection {
-  /** Starts Gemini CLI in `cwd` and completes the ACP handshake. With an
+  /** Starts Antigravity CLI in `cwd` and completes the ACP handshake. With an
    * `agent`, the process carries a Buzz credential that acts as that agent,
-   * so `buzz` commands Gemini runs reach the community as it (newer Buzz).
-   *
-   * npx runs the pinned Gemini CLI from npm's cache, which is quick and works
-   * offline. A cache older than that release doesn't list it yet; then the
-   * start is tried once more with the registry. */
-  static async start(host, options) {
+   * so `buzz` commands Antigravity runs reach the community as it. */
+  static async start(host, { cwd, agent, permissionMode, onStderr, onDeclined } = {}) {
+    const connection = new AcpConnection(permissionMode, onStderr, onDeclined);
     try {
-      return await AcpConnection.open(host, options, { npm_config_prefer_offline: "true" });
-    } catch (error) {
-      if (!error.staleCache) throw error;
-      return AcpConnection.open(host, options, { npm_config_prefer_offline: "false" });
-    }
-  }
-
-  static async open(host, { cwd, agent, permissionMode, onStderr }, npm) {
-    const connection = new AcpConnection(permissionMode, onStderr);
-    try {
-      await connection.spawn(host, cwd, agent, npm);
+      await connection.spawn(host, cwd, agent);
       if (agent && typeof connection.process.actAs === "function")
         await connection.process.actAs({ pubkey: agent.pubkey, relay: agent.relay }).catch((error) => {
-          // Only `buzz` commands inside Gemini's tools lose their identity.
-          console.warn("gemini-acp: could not bind the agent's credential", error);
+          // Only `buzz` commands inside Antigravity's tools lose their identity.
+          console.warn("antigravity-acp: could not bind the agent's credential", error);
         });
       connection.info = await connection.request(
         "initialize",
         {
           protocolVersion: 1,
-          // Gemini CLI reads and writes files and runs commands itself.
+          // Antigravity reads and writes files and runs commands itself.
           clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
           clientInfo: CLIENT_INFO,
         },
@@ -53,27 +34,17 @@ export class AcpConnection {
     } catch (error) {
       // A process that never finished starting is not left running.
       void connection.stop();
-      throw connection.startFailure(error);
+      throw error;
     }
-  }
-
-  /** Why Gemini CLI didn't start, in words a person can act on. */
-  startFailure(error) {
-    const said = this.stderr;
-    if (!/npm (error|ERR)/.test(said)) return error;
-    if (STALE_CACHE.test(said)) return Object.assign(new Error(errorText(error)), { staleCache: true });
-    if (OFFLINE.test(said))
-      return new Error(
-        `${TITLE} couldn't download Gemini CLI: this computer can't reach the npm registry. Connect once; after that it starts offline.`,
-      );
-    return new Error(`${TITLE} couldn't install Gemini CLI with npm:\n${lastLines(said, 4)}`);
   }
 
   /** `permissionMode(sessionId)`: the mode a session runs in, which decides
    * how its permission prompts are answered. */
-  constructor(permissionMode = () => undefined, onStderr = undefined) {
+  constructor(permissionMode = () => undefined, onStderr = undefined, onDeclined = undefined) {
     this.permissionMode = permissionMode;
     this.onStderr = onStderr;
+    /** `onDeclined(sessionId)`: Buzz declined one of the session's tools. */
+    this.onDeclined = onDeclined;
     this.process = undefined;
     this.info = undefined;
     /** Why the connection ended; undefined while it is open. */
@@ -87,12 +58,12 @@ export class AcpConnection {
     this.closeListeners = new Set();
   }
 
-  async spawn(host, cwd, agent, npm = {}) {
+  async spawn(host, cwd, agent) {
     let buffer = "";
     try {
       this.process = await host.spawn(PROCESS, {
         cwd,
-        env: { ...ADAPTER_ENV, ...npm },
+        env: { ...ADAPTER_ENV },
         ...(agent ? { agentCredential: true } : {}),
         onStdout: (data) => {
           buffer += data;
@@ -109,11 +80,11 @@ export class AcpConnection {
       });
     } catch (error) {
       const reason = errorText(error);
-      // No npx: Node.js isn't installed, or not where Buzz looks for programs.
+      // No agy: Antigravity CLI isn't installed, or not where Buzz looks.
       throw new Error(
         /no such file|not found|os error 2|enoent/i.test(reason)
-          ? `${TITLE} needs ${NODE_REQUIRED} on this computer. Install it from https://nodejs.org, then press Check again in Settings → Agent setup.`
-          : `Could not start Gemini CLI (${reason}).`,
+          ? `${TITLE} needs Google's Antigravity CLI on this computer. Install it in a terminal with ${INSTALL_COMMAND} then press Check again in Settings → Agent setup.`
+          : `Could not start Antigravity CLI (${reason}).`,
       );
     }
     void this.process.exited.then(
@@ -130,16 +101,28 @@ export class AcpConnection {
     return this.info?.agentCapabilities ?? {};
   }
 
-  /** Whether a saved session can be opened again (`session/load`). */
-  get canLoad() {
-    return this.capabilities.loadSession === true;
+  get sessionCapabilities() {
+    return this.capabilities.sessionCapabilities ?? {};
   }
 
-  /** Whether the agent offers the sign-in with a Google account. */
+  /** Antigravity steers a prompt sent while a turn runs into that turn. */
+  get canSteer() {
+    return /antigravity/i.test(this.info?.agentInfo?.name ?? "");
+  }
+
+  /** Whether Buzz's system prompt can be added to Antigravity's own. */
+  get appendsSystemPrompt() {
+    return this.capabilities._meta?.antigravity?.systemPrompt?.append === true;
+  }
+
+  /** Whether Antigravity offers the sign-in with a personal Google account. */
   get offersGoogleLogin() {
-    return (Array.isArray(this.info?.authMethods) ? this.info.authMethods : []).some(
-      (method) => method?.id === GOOGLE_LOGIN,
-    );
+    return (Array.isArray(this.info?.authMethods) ? this.info.authMethods : []).some((method) => method?.id === GOOGLE_LOGIN);
+  }
+
+  /** Whether Antigravity can sign out, so another account can sign in. */
+  get canLogOut() {
+    return Boolean(this.capabilities.auth?.logout);
   }
 
   /** Calls `listener` with each `session/update` for `sessionId`. */
@@ -214,10 +197,14 @@ export class AcpConnection {
     } else waiter.resolve(message.result);
   }
 
-  /** Answers a request Gemini CLI makes of Buzz. */
+  /** Answers a request Antigravity makes of Buzz. */
   answer(method, params) {
-    if (method === "session/request_permission")
-      return { result: permissionAnswer(params, this.permissionMode(params.sessionId)) };
+    if (method === "session/request_permission") {
+      const result = permissionAnswer(params, this.permissionMode(params.sessionId));
+      const chosen = (params.options ?? []).find((option) => option?.optionId === result.outcome.optionId);
+      if (String(chosen?.kind ?? "").startsWith("reject")) this.onDeclined?.(params.sessionId);
+      return { result };
+    }
     // Extensions need no answer beyond receipt.
     if (method.startsWith("_")) return { result: {} };
     return { error: { code: -32601, message: `Buzz does not offer ${method}` } };

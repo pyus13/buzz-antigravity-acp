@@ -1,5 +1,5 @@
 // Icons drawn as Buzz's icon set draws them: Tabler outlines, sized in rem.
-import geminiLogo from "../assets/gemini-logo.svg";
+import antigravityLogo from "../assets/antigravity-logo.svg";
 import harnessMark from "../assets/harness-mark.svg";
 import { h } from "./react.js";
 
@@ -43,7 +43,7 @@ function picture(href) {
   };
 }
 
-/** Gemini's sparkle, beside each Gemini model. */
-export const GeminiLogoIcon = picture(geminiLogo);
-/** This harness's mark: Gemini's sparkle with a "+" badge, Gemini extended. */
+/** Antigravity's arch, beside each model it offers. */
+export const AntigravityLogoIcon = picture(antigravityLogo);
+/** This harness's mark: Antigravity's arch with a "+" badge, extended. */
 export const HarnessIcon = picture(harnessMark);

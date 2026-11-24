@@ -49,7 +49,7 @@ export function withSyncedSettings(config, settings) {
   return { ...config, ...synced };
 }
 
-/** What a Gemini session is created from. When it changes, the conversation
+/** What an Antigravity session is created from. When it changes, the conversation
  * starts a new session; model, thinking and permissions change in place. */
 export const sessionShape = (settings) =>
   JSON.stringify([settings.instructions, settings.workspace, settings.scope]);

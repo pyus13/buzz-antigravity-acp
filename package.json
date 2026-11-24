@@ -1,8 +1,8 @@
 {
-  "name": "buzz-gemini-acp",
-  "version": "1.0.1",
+  "name": "buzz-antigravity-acp",
+  "version": "2.0.0",
   "private": true,
-  "description": "A Buzz harness plugin that runs Gemini CLI through the Agent Client Protocol, signed in with your own Google account.",
+  "description": "A Buzz harness plugin that runs Google's Antigravity CLI through the Agent Client Protocol, on your own Google AI Pro or Ultra plan.",
   "type": "module",
   "engines": {
     "node": ">=20"

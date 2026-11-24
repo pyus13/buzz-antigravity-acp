@@ -1,19 +1,19 @@
-// What Gemini offers on this computer and whether it is signed in: the models,
-// the Google account, and the readiness Buzz shows in Settings → Agent setup.
-// Read with a short-lived Gemini CLI process that opens one session and runs
-// no turn. Signing in runs Gemini CLI's own Google sign-in, in the browser.
+// What Antigravity offers on this computer and whether it is signed in: the
+// models with their thinking levels, the plan the Google account is on, and
+// the readiness Buzz shows in Settings → Agent setup. Read with a short-lived
+// Antigravity CLI process that opens one session and runs no turn. Signing in
+// runs Antigravity's own Google sign-in, in the browser.
 import { AcpConnection } from "../acp/connection.js";
-import { errorText, modelsOf, needsSignIn } from "../acp/protocol.js";
-import { GOOGLE_LOGIN, SESSION_TIMEOUT_MS, SIGN_IN_TIMEOUT_MS, TITLE } from "../constants.js";
+import { choicesOf, errorText, needsSignIn, optionOf, tierOf } from "../acp/protocol.js";
+import { CLOSE_TIMEOUT_MS, FREE_TIER, GOOGLE_LOGIN, SIGN_IN_TIMEOUT_MS, START_TIMEOUT_MS, TITLE } from "../constants.js";
 import { DEFAULTS } from "../config.js";
 
 const CHECKING = Object.freeze({ readiness: "checking", models: [], loading: true });
-const SIGN_IN = "Sign in to Gemini";
+const SIGN_IN = "Sign in to Antigravity";
 const SIGN_IN_HOW =
-  "Sign in with the Google account of your Gemini subscription, or run gemini in a terminal and choose Sign in with Google, then check again.";
-/** Where Gemini CLI keeps the signed-in account (`google_accounts.json`). */
-const ACCOUNTS = "~/.gemini";
+  "Sign in with the Google account that has your Google AI Pro or Ultra plan, or run agy in a terminal and sign in there, then check again.";
 const AUTH_URL = /https:\/\/accounts\.google\.com\/\S+/;
+const OFFERED = (level) => level.value !== "default";
 
 export class Catalog {
   constructor(host, notify) {
@@ -31,6 +31,11 @@ export class Catalog {
   set(change) {
     this.state = Object.freeze({ ...this.state, ...change });
     this.notify();
+  }
+
+  /** The plan a session said the account is on, once it changes. */
+  sawTier(tier) {
+    if (tier.id !== this.state.tier?.id || tier.name !== this.state.tier?.name) this.set({ tier });
   }
 
   /** Reads the catalog the first time anyone asks for it. */
@@ -56,7 +61,13 @@ export class Catalog {
         }),
       )
       .then((state) => {
-        this.state = Object.freeze({ ...state, loading: false, signingIn: Boolean(this.signingIn) });
+        this.state = Object.freeze({
+          ...state,
+          loading: false,
+          signingIn: Boolean(this.signingIn),
+          // Why the last sign-in failed, until one works.
+          ...(this.state.signInError && state.readiness !== "ready" ? { signInError: this.state.signInError } : {}),
+        });
         this.reading = undefined;
         this.notify();
         return this.state;
@@ -77,7 +88,7 @@ export class Catalog {
     try {
       let created;
       try {
-        created = await connection.request("session/new", { cwd, mcpServers: [] }, SESSION_TIMEOUT_MS);
+        created = await connection.request("session/new", { cwd, mcpServers: [] }, START_TIMEOUT_MS);
       } catch (error) {
         if (connection.closed || !needsSignIn(error)) throw error;
         return {
@@ -90,36 +101,56 @@ export class Catalog {
           models: [],
         };
       }
-      const models = modelsOf(created).choices.map((choice) => ({
-        id: choice.value,
-        label: choice.name,
-        description: choice.description,
-        // Gemini CLI's ACP mode lets a client pick no thinking level: each
-        // model thinks as Gemini sets it up.
-        efforts: [],
-      }));
-      return { readiness: "ready", account: await this.account(), models, default: modelsOf(created).current };
+      const models = await this.modelsOf(connection, created);
+      if (connection.sessionCapabilities.close)
+        await connection.request("session/close", { sessionId: created.sessionId }, CLOSE_TIMEOUT_MS).catch(() => {});
+      const tier = tierOf(created);
+      return {
+        readiness: "ready",
+        models,
+        default: optionOf(created.configOptions, "model")?.currentValue,
+        canSignIn: connection.offersGoogleLogin,
+        canSwitch: connection.offersGoogleLogin && connection.canLogOut,
+        ...(tier ? { tier } : {}),
+      };
     } finally {
       void connection.stop();
     }
   }
 
-  /** The signed-in Google account, as Gemini CLI saved it, if it says. */
-  async account() {
-    try {
-      const folder = await this.host.resolveDirectory(ACCOUNTS);
-      const bytes = await this.host.readFile("google_accounts.json", { cwd: folder });
-      const active = JSON.parse(new TextDecoder().decode(bytes))?.active;
-      return typeof active === "string" && active ? active : undefined;
-    } catch {
-      return undefined;
+  /** Each model with the thinking levels it takes, read by switching the
+   * session to it, and the level it starts on. */
+  async modelsOf(connection, created) {
+    const { sessionId } = created;
+    let options = created.configOptions ?? [];
+    const models = [];
+    for (const choice of choicesOf(optionOf(options, "model")?.options)) {
+      const model = optionOf(options, "model");
+      if (model?.currentValue !== choice.value) {
+        const changed = await connection
+          .request("session/set_config_option", { sessionId, configId: model.id, value: choice.value }, START_TIMEOUT_MS)
+          .catch(() => undefined);
+        if (Array.isArray(changed?.configOptions)) options = changed.configOptions;
+      }
+      const effort = optionOf(options, "thought_level");
+      models.push({
+        id: choice.value,
+        label: choice.name,
+        description: choice.description,
+        efforts: choicesOf(effort?.options)
+          .filter(OFFERED)
+          .map((level) => ({ id: level.value, label: level.name })),
+        ...(effort?.currentValue && effort.currentValue !== "default" ? { effort: effort.currentValue } : {}),
+      });
     }
+    return models;
   }
 
-  /** Signs in with a Google account in the browser, as `gemini` does, then
-   * reads the catalog again. Gemini CLI saves the sign-in for every later
-   * start, the terminal's included. */
-  signIn() {
+  /** Signs in with a Google account in the browser, as `agy` does, then
+   * reads the catalog again. With `switching`, the signed-in account is
+   * signed out first, so another one can sign in. Antigravity keeps the
+   * sign-in for every later start, the terminal's included. */
+  signIn({ switching = false } = {}) {
     if (this.signingIn) return this.signingIn;
     this.set({ signingIn: true, signInError: undefined, signInUrl: undefined });
     this.signingIn = (async () => {
@@ -134,9 +165,11 @@ export class Catalog {
             if (url && url !== this.state.signInUrl) this.set({ signInUrl: url });
           },
         });
-        if (!connection.offersGoogleLogin) throw new Error(`This Gemini CLI does not offer sign-in with Google.`);
-        await connection.request("authenticate", { methodId: GOOGLE_LOGIN }, SIGN_IN_TIMEOUT_MS);
-        this.set({ signInUrl: undefined });
+        if (!connection.offersGoogleLogin) throw new Error("This Antigravity CLI does not offer sign-in with Google.");
+        if (switching && connection.canLogOut) await connection.request("logout", {}, START_TIMEOUT_MS);
+        const answer = await connection.request("authenticate", { methodId: GOOGLE_LOGIN }, SIGN_IN_TIMEOUT_MS);
+        const tier = tierOf(answer);
+        this.set({ signInUrl: undefined, ...(tier ? { tier } : {}) });
       } catch (error) {
         this.set({ signInError: errorText(error) });
       } finally {
@@ -149,3 +182,7 @@ export class Catalog {
     return this.signingIn;
   }
 }
+
+/** Whether the account's plan is Antigravity's free one: no Google AI Pro or
+ * Ultra plan, as on a Google Workspace account. */
+export const onFreeTier = (state) => state?.tier?.id === FREE_TIER;

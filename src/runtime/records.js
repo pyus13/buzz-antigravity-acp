@@ -1,4 +1,4 @@
-// Each agent's saved sessions: which Gemini session each conversation
+// Each agent's saved sessions: which Antigravity session each conversation
 // continues, and what it has been shown.
 import { SAVED_CONVERSATIONS } from "../constants.js";
 
@@ -56,7 +56,7 @@ export class SessionRecords {
         while (write.owed) {
           const next = write.owed;
           write.owed = undefined;
-          await this.write(agentKey, next).catch((error) => console.warn("gemini-acp: could not save sessions", error));
+          await this.write(agentKey, next).catch((error) => console.warn("antigravity-acp: could not save sessions", error));
         }
         write.running = undefined;
       })();

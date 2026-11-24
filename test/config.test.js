@@ -18,8 +18,8 @@ describe("readConfig", () => {
 
   it("keeps valid values and replaces invalid ones", () => {
     expect(
-      readConfig({ model: " gemini-2.5-pro ", effort: "", mode: "acceptEdits", workspace: "  ", scope: "channel", instructions: "x" }),
-    ).toEqual({ model: "gemini-2.5-pro", effort: "", mode: "acceptEdits", instructions: "x", workspace: "~/.buzz", scope: "channel" });
+      readConfig({ model: " gemini-3.8-flash ", effort: "low", mode: "auto", workspace: "  ", scope: "channel", instructions: "x" }),
+    ).toEqual({ model: "gemini-3.8-flash", effort: "low", mode: "auto", instructions: "x", workspace: "~/.buzz", scope: "channel" });
     expect(readConfig({ mode: "yolo", scope: "everything", model: 3 })).toMatchObject({
       mode: "bypassPermissions",
       scope: "thread",

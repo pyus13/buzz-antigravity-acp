@@ -72,12 +72,12 @@ function Opened({ conversation, row, onView }) {
           {row ? (
             <Row
               row={row}
-              detail={[row.status, row.at && `Last active ${when(row.at)}`].filter(Boolean).join(" · ") || "Gemini session"}
+              detail={[row.status, row.at && `Last active ${when(row.at)}`].filter(Boolean).join(" · ") || "Antigravity session"}
               onView={onView}
             />
           ) : (
             <span style={{ display: "grid", gap: "var(--space-1)" }}>
-              <span className="text-label">No Gemini session here yet</span>
+              <span className="text-label">No Antigravity session here yet</span>
               <span className="text-body-sm text-subtle">One starts when you mention the agent in this {place}.</span>
             </span>
           )}
@@ -113,7 +113,7 @@ function TranscriptView({ agent, row, working, onBack }) {
               No turns recorded for this conversation on this device yet.
             </p>
           }
-          failed="Could not read the Gemini session"
+          failed="Could not read the Antigravity session"
         />
       ) : (
         <p className="text-body-sm text-subtle" style={{ margin: 0 }}>

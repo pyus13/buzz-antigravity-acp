@@ -1,36 +1,34 @@
-// Gemini (ACP) for Buzz 1.0.1. Built from src/ by scripts/build.mjs; edit the sources, not this file.
+// Antigravity (ACP) for Buzz 2.0.0. Built from src/ by scripts/build.mjs; edit the sources, not this file.
 
 // src/constants.js
-var TYPE_ID = "gemini-acp";
-var TITLE = "Gemini (ACP)";
-var PLUGIN_ID = "local.gemini-acp";
-var PROCESS = "gemini";
-var NODE_REQUIRED = "Node.js 20 or later";
+var TYPE_ID = "antigravity-acp";
+var TITLE = "Antigravity (ACP)";
+var PLUGIN_ID = "local.antigravity-acp";
+var PROCESS = "agy";
+var INSTALL_COMMAND = "curl -fsSL https://antigravity.google/cli/install.sh | bash";
 var GOOGLE_LOGIN = "oauth-personal";
+var FREE_TIER = "free-tier";
 var MODES = Object.freeze([
-  ["bypassPermissions", "Bypass permissions", "Gemini runs every tool without asking (YOLO).", "yolo"],
-  ["acceptEdits", "Accept edits", "Edits files without asking; Buzz allows other tools.", "autoEdit"],
-  ["default", "Ask", "Gemini asks before each tool; Buzz allows it once.", "default"],
-  ["plan", "Plan", "Gemini plans and posts the plan; it changes nothing.", "plan"]
+  ["bypassPermissions", "Bypass permissions", "Antigravity runs every tool without asking.", "accept-edits"],
+  ["auto", "Auto", "Antigravity decides which actions need care; Buzz allows what it asks.", "auto"],
+  ["acceptEdits", "Accept edits", "Edits files without asking; Buzz allows other tools.", "accept-edits"],
+  ["plan", "Plan", "Antigravity plans and posts the plan; it changes nothing.", "plan"]
 ]);
-var geminiMode = (mode) => MODES.find(([id]) => id === mode)?.[3] ?? "yolo";
+var agentMode = (mode) => MODES.find(([id]) => id === mode)?.[3] ?? "accept-edits";
 var SCOPES = Object.freeze([
   ["thread", "One session per thread"],
   ["channel", "One session per channel"]
 ]);
 var ADAPTER_ENV = Object.freeze({
-  npm_config_update_notifier: "false",
-  npm_config_fund: "false",
   GEMINI_API_KEY: null,
   GOOGLE_API_KEY: null,
   GOOGLE_GENAI_USE_VERTEXAI: null,
   GOOGLE_GEMINI_BASE_URL: null,
-  GEMINI_CLI_TRUST_WORKSPACE: "true",
-  GEMINI_SANDBOX: null,
+  AGY_ADC_AUTH: null,
   NO_COLOR: "1"
 });
-var START_TIMEOUT_MS = 3e5;
-var SESSION_TIMEOUT_MS = 12e4;
+var START_TIMEOUT_MS = 12e4;
+var CLOSE_TIMEOUT_MS = 3e4;
 var SIGN_IN_TIMEOUT_MS = 5 * 6e4;
 var IDLE_MS = 15 * 6e4;
 var MAX_LIVE_SESSIONS = 12;
@@ -98,25 +96,27 @@ function describeMigration(saved) {
 }
 
 // src/acp/protocol.js
+var EVENT = "buzz-event";
+var STEER = "new-message-arrived-while-you-were-working";
+var STEER_NOTE = "Note: A new message arrived while you were working. Continue your in-progress work and incorporate the new message if it's relevant; if it's unrelated, you may briefly acknowledge it and carry on.";
 var TOOL_LABELS = Object.freeze({
-  read_file: "Read",
-  read_many_files: "Read",
-  write_file: "Write",
-  replace: "Edit",
-  edit: "Edit",
-  run_shell_command: "Shell",
-  list_directory: "List",
-  glob: "Glob",
+  view_file: "Read",
+  view_file_outline: "Read",
+  view_code_item: "Read",
+  write_to_file: "Write",
+  replace_file_content: "Edit",
+  multi_replace_file_content: "Edit",
+  run_command: "Shell",
+  command_status: "Shell",
+  send_command_input: "Shell",
+  list_dir: "List",
+  find_by_name: "Find",
   grep_search: "Search",
-  search_file_content: "Search",
-  google_web_search: "Web search",
-  web_fetch: "Fetch",
-  save_memory: "Memory",
-  write_todos: "Todos",
-  enter_plan_mode: "Plan",
-  exit_plan_mode: "Plan",
-  ask_user: "Ask",
-  activate_skill: "Skill"
+  codebase_search: "Search",
+  search_web: "Web search",
+  read_url_content: "Fetch",
+  browser_subagent: "Browser",
+  generate_image: "Image"
 });
 var KIND_LABELS = Object.freeze({
   read: "Read",
@@ -130,100 +130,96 @@ var KIND_LABELS = Object.freeze({
   switch_mode: "Plan"
 });
 var TARGET_LIMIT = 80;
-var MODE_NOTE = /^\[MODE_UPDATE\]/;
-function toolNameOf(call) {
-  const mcp = call?._meta?.["gemini-cli"]?.mcp;
-  if (typeof mcp?.server_name === "string" && typeof mcp?.tool_name === "string")
-    return `mcp_${mcp.server_name}_${mcp.tool_name}`;
-  const id = typeof call?.toolCallId === "string" ? call.toolCallId : "";
-  const named = /^(.+?)[_-]\d{10,}[_-]\d+$/.exec(id)?.[1];
-  if (named && !named.startsWith("synth_")) return named;
-  const message = /^(send|reply_in_subthread)\(/.exec(typeof call?.title === "string" ? call.title : "")?.[1];
-  return message ? `mcp_buzz_${message}` : void 0;
+var STEP_TARGETS = ["AbsolutePath", "TargetFile", "DirectoryPath", "SearchPath", "Query", "Url", "CommandLine", "path", "query", "url", "command"];
+var CHANGES = /* @__PURE__ */ new Set(["edit", "delete", "move", "execute"]);
+function steerPrompt(turn) {
+  const open = `
+<${EVENT}>
+`;
+  const close = `
+</${EVENT}>`;
+  const once = (text) => turn.includes(text) && turn.indexOf(text) === turn.lastIndexOf(text);
+  const steered = once(open) && once(close) ? turn.replace(open, `
+<${STEER}>
+`).replace(close, `
+</${STEER}>`) : `<${STEER}>
+${turn.trim()}
+</${STEER}>`;
+  return `${steered}
+
+${STEER_NOTE}`;
 }
-var buzzToolOf = (name) => typeof name === "string" ? /^mcp_buzz_(\w+)$/.exec(name)?.[1] : void 0;
+var toolNameOf = (call) => typeof call?.name === "string" && call.name ? call.name : void 0;
+function buzzToolOf(call) {
+  const name = toolNameOf(call) ?? "";
+  const named = /^(?:mcp[_:]+)?buzz(?:__|_|\/|:|\.)(\w+)$/.exec(name)?.[1];
+  if (named) return named;
+  const mcp = call?._meta?.antigravity?.mcp ?? call?.rawInput?.__mcp;
+  return mcp?.server === "buzz" && typeof mcp.tool === "string" ? mcp.tool : void 0;
+}
 var short = (text) => {
-  const line = text.split("\n")[0].trim();
+  const line = String(text).split("\n")[0].trim();
   const tail = line.startsWith("/") ? line.split("/").at(-1) || line : line;
   return tail.length > TARGET_LIMIT ? `${tail.slice(0, TARGET_LIMIT - 1)}\u2026` : tail;
 };
 function stepOf(update) {
   switch (update?.sessionUpdate) {
     case "tool_call": {
-      const name = toolNameOf(update);
-      const buzz = buzzToolOf(name);
+      const buzz = buzzToolOf(update);
       if (buzz) return { tool: buzz };
-      const title = typeof update.title === "string" ? update.title.trim() : "";
-      const tool = TOOL_LABELS[name] ?? KIND_LABELS[update.kind] ?? (name ? name.replace(/^mcp_/, "") : "Tool");
-      const target = title && title !== name ? short(title) : "";
-      return target ? { tool, target } : { tool };
+      const name = toolNameOf(update);
+      const tool = TOOL_LABELS[name] ?? KIND_LABELS[update.kind] ?? (name || "Tool");
+      const input = update.rawInput && typeof update.rawInput === "object" ? update.rawInput : {};
+      const target = STEP_TARGETS.map((key) => input[key]).find((value) => typeof value === "string" && value) ?? (typeof update.title === "string" && update.title !== name ? update.title : "");
+      return target ? { tool, target: short(target) } : { tool };
     }
     case "agent_thought_chunk":
       return { tool: "Thinking" };
     case "agent_message_chunk":
-      return MODE_NOTE.test(update.content?.text ?? "") ? void 0 : { tool: "Writing reply" };
+      return { tool: "Writing reply" };
     default:
       return void 0;
   }
 }
-var modeNote = (update) => MODE_NOTE.test(update?.content?.text ?? "");
 function permissionAnswer(params, mode) {
   const options = (Array.isArray(params?.options) ? params.options : []).filter(
     (option) => typeof option?.optionId === "string"
   );
   const select = (option) => option ? { outcome: { outcome: "selected", optionId: option.optionId } } : { outcome: { outcome: "cancelled" } };
-  const reject = () => select(options.find((option) => String(option.kind).startsWith("reject")));
-  const name = toolNameOf(params?.toolCall);
-  const leavesPlan = name === "exit_plan_mode" || params?.toolCall?.kind === "switch_mode";
-  if (name === "ask_user") return reject();
-  if (leavesPlan && (mode === "plan" || !mode)) return reject();
+  const call = params?.toolCall;
+  if (mode === "plan" && !buzzToolOf(call) && CHANGES.has(call?.kind))
+    return select(options.find((option) => String(option.kind).startsWith("reject")));
   return select(options.find((option) => option.kind === "allow_once"));
 }
-function modelsOf(answer) {
-  const models = Array.isArray(answer?.models?.availableModels) ? answer.models.availableModels : [];
-  return {
-    current: typeof answer?.models?.currentModelId === "string" ? answer.models.currentModelId : void 0,
-    choices: models.filter((model) => typeof model?.modelId === "string" && model.modelId).map((model) => ({
-      value: model.modelId,
-      name: typeof model.name === "string" && model.name ? model.name : model.modelId,
-      description: typeof model.description === "string" && model.description ? model.description : void 0
-    }))
-  };
-}
-function modesOf(answer) {
-  const modes = Array.isArray(answer?.modes?.availableModes) ? answer.modes.availableModes : [];
-  return {
-    current: typeof answer?.modes?.currentModeId === "string" ? answer.modes.currentModeId : void 0,
-    ids: modes.map((mode) => mode?.id).filter((id) => typeof id === "string")
-  };
+var choicesOf = (options = []) => (Array.isArray(options) ? options : []).flatMap(
+  (option) => Array.isArray(option?.options) ? choicesOf(option.options) : typeof option?.value === "string" ? [{ value: option.value, name: option.name || option.value, description: option.description }] : []
+);
+var optionOf = (configOptions, category) => Array.isArray(configOptions) ? configOptions.find((option) => option?.category === category) ?? configOptions.find((option) => option?.id === category) : void 0;
+function tierOf(answer) {
+  const tier = answer?._meta?.antigravity?.tier;
+  return tier && typeof tier === "object" && typeof tier.name === "string" ? { id: typeof tier.id === "string" ? tier.id : "", name: tier.name, ...typeof tier.upgradeUri === "string" ? { upgradeUri: tier.upgradeUri } : {} } : void 0;
 }
 var count = (value) => typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
-function observationsOf(answer, fallbackModel, at = Date.now()) {
+function observationsOf(answer, model, at = Date.now()) {
   const usage = answer?.usage;
   if (!usage || typeof usage !== "object") return [];
   const input = count(usage.inputTokens);
-  const cached = Math.min(count(usage.cachedReadTokens), input);
+  const cacheRead = Math.min(count(usage.cachedReadTokens), input);
+  const cacheWrite = count(usage.cachedWriteTokens);
   const output = count(usage.outputTokens) + count(usage.thoughtTokens);
   if (!input && !output) return [];
-  const perModel = (Array.isArray(answer?._meta?.quota?.model_usage) ? answer._meta.quota.model_usage : []).filter(
-    (entry) => typeof entry?.model === "string" && entry.model
-  );
-  const tokens = (inputCount, outputCount, cache) => ({
-    input: Math.max(0, inputCount - cache),
-    output: outputCount,
-    ...cache ? { cacheRead: cache } : {}
-  });
-  if (perModel.length <= 1)
-    return [{ at, model: perModel[0]?.model ?? fallbackModel ?? "gemini", tokens: tokens(input, output, cached) }];
-  const largest = perModel.reduce(
-    (top, entry) => count(entry.token_count?.input_tokens) > count(top.token_count?.input_tokens) ? entry : top
-  );
-  return perModel.map((entry) => {
-    const own = entry === largest;
-    const entryInput = count(entry.token_count?.input_tokens);
-    const entryOutput = count(entry.token_count?.output_tokens) + (own ? count(usage.thoughtTokens) : 0);
-    return { at, model: entry.model, tokens: tokens(entryInput, entryOutput, own ? Math.min(cached, entryInput) : 0) };
-  });
+  return [
+    {
+      at,
+      model: model || "antigravity",
+      tokens: {
+        input: Math.max(0, input - cacheRead),
+        output,
+        ...cacheRead ? { cacheRead } : {},
+        ...cacheWrite ? { cacheWrite } : {}
+      }
+    }
+  ];
 }
 function errorText(error) {
   if (error instanceof Error) return error.message;
@@ -233,9 +229,7 @@ function errorText(error) {
   }
   return String(error);
 }
-var needsSignIn = (error) => /auth(entication)? required|api key is missing|not configured|login required|sign.?in|credentials|unauthenticated|invalid_grant|-32000/i.test(
-  errorText(error)
-) || error?.code === -32e3;
+var needsSignIn = (error) => error?.code === -32e3 || /authentication required|not (signed|logged) in/i.test(errorText(error));
 var lastLines = (text, count2 = 6) => text.trim().split("\n").slice(-count2).join("\n");
 var effortLabel = (id) => id === "xhigh" ? "Extra high" : `${id.charAt(0).toUpperCase()}${id.slice(1)}`;
 function promptSections(text) {
@@ -261,38 +255,24 @@ function promptSections(text) {
 }
 
 // src/acp/connection.js
-var CLIENT_INFO = { name: "buzz-gemini-acp", version: true ? "1.0.1" : "dev" };
-var STALE_CACHE = /ETARGET|notarget|No matching version/;
-var OFFLINE = /ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENETUNREACH|network/i;
+var CLIENT_INFO = { name: "buzz-antigravity-acp", version: true ? "2.0.0" : "dev" };
 var AcpConnection = class _AcpConnection {
-  /** Starts Gemini CLI in `cwd` and completes the ACP handshake. With an
+  /** Starts Antigravity CLI in `cwd` and completes the ACP handshake. With an
    * `agent`, the process carries a Buzz credential that acts as that agent,
-   * so `buzz` commands Gemini runs reach the community as it (newer Buzz).
-   *
-   * npx runs the pinned Gemini CLI from npm's cache, which is quick and works
-   * offline. A cache older than that release doesn't list it yet; then the
-   * start is tried once more with the registry. */
-  static async start(host, options) {
+   * so `buzz` commands Antigravity runs reach the community as it. */
+  static async start(host, { cwd, agent, permissionMode, onStderr, onDeclined } = {}) {
+    const connection = new _AcpConnection(permissionMode, onStderr, onDeclined);
     try {
-      return await _AcpConnection.open(host, options, { npm_config_prefer_offline: "true" });
-    } catch (error) {
-      if (!error.staleCache) throw error;
-      return _AcpConnection.open(host, options, { npm_config_prefer_offline: "false" });
-    }
-  }
-  static async open(host, { cwd, agent, permissionMode, onStderr }, npm) {
-    const connection = new _AcpConnection(permissionMode, onStderr);
-    try {
-      await connection.spawn(host, cwd, agent, npm);
+      await connection.spawn(host, cwd, agent);
       if (agent && typeof connection.process.actAs === "function")
         await connection.process.actAs({ pubkey: agent.pubkey, relay: agent.relay }).catch((error) => {
-          console.warn("gemini-acp: could not bind the agent's credential", error);
+          console.warn("antigravity-acp: could not bind the agent's credential", error);
         });
       connection.info = await connection.request(
         "initialize",
         {
           protocolVersion: 1,
-          // Gemini CLI reads and writes files and runs commands itself.
+          // Antigravity reads and writes files and runs commands itself.
           clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
           clientInfo: CLIENT_INFO
         },
@@ -301,26 +281,15 @@ var AcpConnection = class _AcpConnection {
       return connection;
     } catch (error) {
       void connection.stop();
-      throw connection.startFailure(error);
+      throw error;
     }
-  }
-  /** Why Gemini CLI didn't start, in words a person can act on. */
-  startFailure(error) {
-    const said = this.stderr;
-    if (!/npm (error|ERR)/.test(said)) return error;
-    if (STALE_CACHE.test(said)) return Object.assign(new Error(errorText(error)), { staleCache: true });
-    if (OFFLINE.test(said))
-      return new Error(
-        `${TITLE} couldn't download Gemini CLI: this computer can't reach the npm registry. Connect once; after that it starts offline.`
-      );
-    return new Error(`${TITLE} couldn't install Gemini CLI with npm:
-${lastLines(said, 4)}`);
   }
   /** `permissionMode(sessionId)`: the mode a session runs in, which decides
    * how its permission prompts are answered. */
-  constructor(permissionMode = () => void 0, onStderr = void 0) {
+  constructor(permissionMode = () => void 0, onStderr = void 0, onDeclined = void 0) {
     this.permissionMode = permissionMode;
     this.onStderr = onStderr;
+    this.onDeclined = onDeclined;
     this.process = void 0;
     this.info = void 0;
     this.closed = void 0;
@@ -331,12 +300,12 @@ ${lastLines(said, 4)}`);
     this.sessionListeners = /* @__PURE__ */ new Map();
     this.closeListeners = /* @__PURE__ */ new Set();
   }
-  async spawn(host, cwd, agent, npm = {}) {
+  async spawn(host, cwd, agent) {
     let buffer = "";
     try {
       this.process = await host.spawn(PROCESS, {
         cwd,
-        env: { ...ADAPTER_ENV, ...npm },
+        env: { ...ADAPTER_ENV },
         ...agent ? { agentCredential: true } : {},
         onStdout: (data) => {
           buffer += data;
@@ -354,7 +323,7 @@ ${lastLines(said, 4)}`);
     } catch (error) {
       const reason = errorText(error);
       throw new Error(
-        /no such file|not found|os error 2|enoent/i.test(reason) ? `${TITLE} needs ${NODE_REQUIRED} on this computer. Install it from https://nodejs.org, then press Check again in Settings \u2192 Agent setup.` : `Could not start Gemini CLI (${reason}).`
+        /no such file|not found|os error 2|enoent/i.test(reason) ? `${TITLE} needs Google's Antigravity CLI on this computer. Install it in a terminal with ${INSTALL_COMMAND} then press Check again in Settings \u2192 Agent setup.` : `Could not start Antigravity CLI (${reason}).`
       );
     }
     void this.process.exited.then(
@@ -370,15 +339,24 @@ ${lastLines(this.stderr)}` : "";
   get capabilities() {
     return this.info?.agentCapabilities ?? {};
   }
-  /** Whether a saved session can be opened again (`session/load`). */
-  get canLoad() {
-    return this.capabilities.loadSession === true;
+  get sessionCapabilities() {
+    return this.capabilities.sessionCapabilities ?? {};
   }
-  /** Whether the agent offers the sign-in with a Google account. */
+  /** Antigravity steers a prompt sent while a turn runs into that turn. */
+  get canSteer() {
+    return /antigravity/i.test(this.info?.agentInfo?.name ?? "");
+  }
+  /** Whether Buzz's system prompt can be added to Antigravity's own. */
+  get appendsSystemPrompt() {
+    return this.capabilities._meta?.antigravity?.systemPrompt?.append === true;
+  }
+  /** Whether Antigravity offers the sign-in with a personal Google account. */
   get offersGoogleLogin() {
-    return (Array.isArray(this.info?.authMethods) ? this.info.authMethods : []).some(
-      (method) => method?.id === GOOGLE_LOGIN
-    );
+    return (Array.isArray(this.info?.authMethods) ? this.info.authMethods : []).some((method) => method?.id === GOOGLE_LOGIN);
+  }
+  /** Whether Antigravity can sign out, so another account can sign in. */
+  get canLogOut() {
+    return Boolean(this.capabilities.auth?.logout);
   }
   /** Calls `listener` with each `session/update` for `sessionId`. */
   onSession(sessionId, listener) {
@@ -446,10 +424,14 @@ ${lastLines(this.stderr)}` : "";
       waiter.reject(error);
     } else waiter.resolve(message.result);
   }
-  /** Answers a request Gemini CLI makes of Buzz. */
+  /** Answers a request Antigravity makes of Buzz. */
   answer(method, params) {
-    if (method === "session/request_permission")
-      return { result: permissionAnswer(params, this.permissionMode(params.sessionId)) };
+    if (method === "session/request_permission") {
+      const result = permissionAnswer(params, this.permissionMode(params.sessionId));
+      const chosen = (params.options ?? []).find((option) => option?.optionId === result.outcome.optionId);
+      if (String(chosen?.kind ?? "").startsWith("reject")) this.onDeclined?.(params.sessionId);
+      return { result };
+    }
     if (method.startsWith("_")) return { result: {} };
     return { error: { code: -32601, message: `Buzz does not offer ${method}` } };
   }
@@ -474,92 +456,86 @@ ${lastLines(this.stderr)}` : "";
 // src/runtime/conversation.js
 var STOPPED = Object.freeze({ ok: true, stopped: true });
 var SETTLE_MS = 5e3;
-var SUMMARY_LIMIT = 4e4;
 var EVENT_ID = /\b[0-9a-f]{64}\b/;
 var MESSAGE_TOOLS = /* @__PURE__ */ new Set(["send", "reply_in_subthread"]);
-var COMPACT_PROMPT = `Your context is being compacted: this session ends here, and a new session continues it from your summary alone.
+var PLAN_NOTE = `<plan-mode>
+You are in plan mode. Research and plan only: read files and search, but don't create, edit, move or delete files or run commands that change anything; Buzz declines them. When your plan is ready, post it with Buzz's send tool.
+</plan-mode>`;
+var PLAN_NUDGE = `<plan-mode>
+That was declined: you are in plan mode, and nothing may change. Don't try it again. Post your plan now with Buzz's send tool.
+</plan-mode>`;
+var turnText = (text, mode) => mode === "plan" ? `${text}
 
-Write that summary now, for yourself. Include who you are working with and what they asked, the decisions made, the work done (files, commands and their results), where things stand, and every open task or promise. Be concise but leave out nothing you will need.
-
-Do not call any tools. Answer with the summary only.`;
-function sessionParams(cwd, mcp) {
+${PLAN_NOTE}` : text;
+var AMBIENT = /* @__PURE__ */ new Set(["available_commands_update", "current_mode_update", "config_option_update", "usage_update"]);
+function sessionParams(cwd, mcp, system) {
   return {
     cwd,
-    mcpServers: [{ type: "http", name: "buzz", url: mcp.url, headers: mcp.headers.map((header) => ({ ...header })) }]
+    mcpServers: [{ type: "http", name: "buzz", url: mcp.url, headers: mcp.headers.map((header) => ({ ...header })) }],
+    ...system ? { _meta: { antigravity: { systemPrompt: { append: system } } } } : {}
   };
 }
-function sessionState(answer) {
-  const models = modelsOf(answer);
-  const modes = modesOf(answer);
-  return {
-    model: models.current,
-    defaultModel: models.current,
-    models: models.choices.map((choice) => choice.value),
-    names: Object.fromEntries(models.choices.map((choice) => [choice.value, choice.name])),
-    mode: modes.current,
-    modes: modes.ids
-  };
-}
-async function applySettings(connection, sessionId, state, wanted) {
-  const next = { ...state };
-  const [mode, modeSynced] = wanted.mode;
-  if (mode && next.mode !== mode) {
-    if (next.modes.length && !next.modes.includes(mode)) {
-      if (modeSynced)
-        throw new Error(`This agent's synced permissions "${mode}" aren't offered by ${TITLE}. Change them in Settings.`);
-    } else {
-      await connection.request("session/set_mode", { sessionId, modeId: mode }, SESSION_TIMEOUT_MS);
-      next.mode = mode;
+async function applyOptions(connection, sessionId, configOptions, wanted) {
+  let options = configOptions;
+  for (const [category, value, synced] of wanted) {
+    const option = optionOf(options, category);
+    if (!option || !value || option.currentValue === value) continue;
+    if (!choicesOf(option.options).some((choice) => choice.value === value)) {
+      if (synced)
+        throw new Error(
+          `This agent's synced ${category === "thought_level" ? "thinking" : category} "${value}" isn't offered by ${TITLE}. Change it in Settings.`
+        );
+      continue;
     }
+    const changed = await connection.request(
+      "session/set_config_option",
+      { sessionId, configId: option.id, value },
+      START_TIMEOUT_MS
+    );
+    options = Array.isArray(changed?.configOptions) ? changed.configOptions : options.map((item) => item.id === option.id ? { ...item, currentValue: value } : item);
   }
-  const [picked, modelSynced] = wanted.model;
-  const model = picked || next.defaultModel;
-  if (model && next.model !== model) {
-    if (next.models.length && !next.models.includes(model)) {
-      if (modelSynced)
-        throw new Error(`This agent's synced model "${model}" isn't offered by ${TITLE}. Change it in Settings.`);
-    } else {
-      await connection.request("session/set_model", { sessionId, modelId: model }, SESSION_TIMEOUT_MS);
-      next.model = model;
-    }
-  }
-  return next;
+  return options;
 }
-function wantedSettings(delivery, settings, defaults) {
+function wantedOptions(delivery, settings, defaults, session = {}) {
   const synced = delivery.synced ?? {};
-  const effective = defaults.effective(settings).model;
-  return {
-    mode: [geminiMode(settings.mode), "mode" in synced],
-    model: [
-      delivery.model || (effective === "default" ? "" : effective),
-      !delivery.model && Boolean(settings.model) && "model" in synced
-    ]
-  };
+  const effective = defaults.effective(settings);
+  const model = delivery.model || (effective.model === "default" ? session.model : effective.model);
+  const effort = delivery.effort || (delivery.model ? "" : effective.effort === "default" ? "" : effective.effort);
+  return [
+    ["mode", agentMode(settings.mode), "mode" in synced],
+    ["model", model, !delivery.model && Boolean(settings.model) && "model" in synced],
+    // A model takes the thinking level asked for, else the one it started on.
+    ["thought_level", effort || session.effort, !delivery.effort && Boolean(settings.effort) && "effort" in synced]
+  ];
 }
 function outcomeOf(stopReason) {
   if (stopReason === "cancelled") return STOPPED;
-  if (stopReason === "refusal") return { ok: false, error: "Gemini declined to continue this turn." };
+  if (stopReason === "refusal") return { ok: false, error: "Antigravity declined to continue this turn." };
   if (stopReason === "max_tokens")
-    return { ok: false, error: "Gemini's context window is full. Compact the session or start a new one." };
-  if (stopReason === "max_turn_requests")
-    return { ok: false, error: "Gemini stopped this turn: it detected a loop or reached its turn limit." };
+    return { ok: false, error: "Antigravity's context window is full. Compact the session or start a new one." };
+  if (stopReason === "max_turn_requests") return { ok: false, error: "Antigravity stopped this turn: it reached its turn limit." };
   return { ok: true };
 }
 var transcriptOutcome = (result) => result.stopped ? "stopped" : result.ok ? "ended" : "error";
-var sessionLost = (error, connection) => Boolean(connection?.closed) || /session not found|unknown session|exited unexpectedly/i.test(errorText(error));
-var sessionGone = (error) => /not found|no previous sessions|invalid session identifier|no such file|enoent/i.test(errorText(error));
-var AMBIENT = /* @__PURE__ */ new Set(["available_commands_update", "current_mode_update", "config_option_update"]);
+var sessionLost = (error, connection) => Boolean(connection?.closed) || /session has ended|exited unexpectedly|not found|unknown session|no such session/i.test(errorText(error));
+var sessionGone = (error) => error?.code === -32002 || /not found|unknown session|no such session|does not exist/i.test(errorText(error));
 var Turn = class {
   constructor(delivery, { compacting = false } = {}) {
-    this.delivery = delivery;
+    this.receipts = delivery ? [delivery] : [];
     this.compacting = compacting;
     this.updated = false;
+    this.named = false;
     this.step = "";
-    this.text = "";
+    this.posted = false;
+    this.declined = false;
+    this.request = void 0;
     this.record = void 0;
     this.done = new Promise((resolve) => {
       this.finish = resolve;
     });
+  }
+  get latest() {
+    return this.receipts.at(-1);
   }
 };
 var Conversation = class {
@@ -569,15 +545,16 @@ var Conversation = class {
     this.record = record;
     this.connection = void 0;
     this.live = false;
-    this.state = void 0;
+    this.options = void 0;
+    this.started = {};
     this.mcp = void 0;
     this.handler = void 0;
     this.unsubscribe = void 0;
-    this.system = void 0;
     this.turn = void 0;
     this.starting = void 0;
     this.queue = [];
     this.pumping = false;
+    this.steering = Promise.resolve();
     this.idleTimer = void 0;
     this.mode = void 0;
     this.used = record?.at ?? 0;
@@ -595,12 +572,13 @@ var Conversation = class {
     return Boolean(this.record?.whole ?? this.wholeNow);
   }
   // --- deliveries
-  /** Runs a mention or wake in this conversation as its next turn. Gemini
-   * CLI can't take a message into a running turn, so one that arrives while
-   * Gemini works waits for the turn to end. */
+  /** Runs a mention or wake in this conversation: steered into the running
+   * turn when it can be, else queued as the next turn. */
   async deliver(delivery, conversation, settings) {
     this.used = Date.now();
     this.wholeNow = conversation.key === conversation.channel;
+    if (typeof conversation.where === "string") this.where = conversation.where;
+    if (await this.trySteer(delivery, conversation)) return;
     const item = { delivery, conversation, settings, stopped: false };
     item.done = new Promise((resolve) => {
       item.resolve = resolve;
@@ -610,6 +588,46 @@ var Conversation = class {
     delivery.interruptible?.(async () => this.stop(item));
     this.agent.changed();
     void this.pump();
+  }
+  /** Steers one message at a time, so each sees the last one's cursor. */
+  trySteer(delivery, conversation) {
+    const attempt = this.steering.then(() => this.steer(delivery, conversation));
+    this.steering = attempt.catch(() => false);
+    return attempt;
+  }
+  /** Antigravity takes a prompt sent while a turn runs into that turn, and
+   * answers the turn's earlier prompt at once: the turn then ends with this
+   * one's answer. */
+  async steer(delivery, conversation) {
+    const turn = this.turn;
+    if (!turn?.request || turn.compacting || !this.live || !this.connection.canSteer || delivery.model || delivery.effort)
+      return false;
+    let prompt;
+    try {
+      prompt = await this.agent.kit.turnPrompt(delivery, conversation, this.cursorOption());
+    } catch (error) {
+      console.warn("antigravity-acp: could not build a steered prompt", error);
+      return false;
+    }
+    if (this.turn !== turn || !this.live) {
+      prompt.restore();
+      return false;
+    }
+    const text = turnText(steerPrompt(prompt.text), this.mode);
+    turn.request = this.connection.request("session/prompt", {
+      sessionId: this.record.sessionId,
+      prompt: [{ type: "text", text }]
+    });
+    this.record.cursor = prompt.cursor;
+    this.save();
+    turn.record?.prompt(delivery, text, true);
+    turn.latest?.superseded?.();
+    turn.receipts.push(delivery);
+    turn.step = "";
+    delivery.acknowledged?.();
+    delivery.workingUntil(turn.done);
+    delivery.interruptible?.(async () => this.stop());
+    return true;
   }
   async pump() {
     if (this.pumping) return;
@@ -642,78 +660,82 @@ var Conversation = class {
       this.agent.changed();
     }
   }
+  /** Waits for the turn's last prompt, and records the token use of each. */
+  async settle(turn, conversation) {
+    for (; ; ) {
+      const request = turn.request;
+      const answer = await request;
+      void this.agent.recordUsage({
+        sessionId: this.record?.sessionId,
+        channelId: conversation?.channel,
+        root: conversation?.root,
+        observations: observationsOf(answer, optionOf(this.options, "model")?.currentValue)
+      });
+      if (turn.request === request) return answer;
+    }
+  }
   async runTurn(item, retried = false) {
     const { delivery, conversation, settings } = item;
     await this.open(delivery, conversation, settings);
     if (item.stopped) return STOPPED;
-    this.state = await applySettings(
+    this.options = await applyOptions(
       this.connection,
       this.record.sessionId,
-      this.state,
-      wantedSettings(delivery, settings, this.agent.defaults)
+      this.options,
+      wantedOptions(delivery, settings, this.agent.defaults, this.started)
     );
     this.mode = settings.mode;
     if (item.stopped) return STOPPED;
-    const before = { cursor: this.record.cursor, primed: this.record.primed, summary: this.record.summary };
+    const before = this.record.cursor;
     const prompt = await this.agent.kit.turnPrompt(delivery, conversation, this.cursorOption());
     if (item.stopped) {
       prompt.restore();
       return STOPPED;
     }
-    const system = this.record.primed ? void 0 : this.system;
-    const summary = this.record.summary;
-    const text = [
-      system,
-      summary && `<previous-session-summary>
-${summary}
-</previous-session-summary>`,
-      prompt.text
-    ].filter(Boolean).join("\n\n");
     const turn = new Turn(delivery);
     const { connection } = this;
-    const sessionId = this.record.sessionId;
     turn.record = await this.agent.transcripts.begin(this.agent.key, this.key, {
-      sessionId,
-      newSession: !this.record.primed,
+      sessionId: this.record.sessionId,
+      newSession: Boolean(this.fresh),
       channelId: conversation.channel,
       root: conversation.root,
       delivery,
-      system,
-      prompt: summary ? `<previous-session-summary>
-${summary}
-</previous-session-summary>
-
-${prompt.text}` : prompt.text,
+      system: this.fresh ? this.system : void 0,
+      prompt: prompt.text,
       config: this.configLabels()
     });
+    this.fresh = false;
     this.turn = turn;
     this.starting = void 0;
     this.agent.changed();
     let result;
     try {
-      const sent = connection.request("session/prompt", { sessionId, prompt: [{ type: "text", text }] });
+      turn.request = connection.request("session/prompt", {
+        sessionId: this.record.sessionId,
+        prompt: [{ type: "text", text: turnText(prompt.text, settings.mode) }]
+      });
       this.record.cursor = prompt.cursor;
-      this.record.primed = true;
-      delete this.record.summary;
       this.save();
       delivery.acknowledged?.();
-      const answer = await sent;
+      let answer = await this.settle(turn, conversation);
+      if (settings.mode === "plan" && answer?.stopReason === "end_turn" && turn.declined && !turn.posted && this.live) {
+        turn.declined = false;
+        turn.record.prompt(delivery, PLAN_NUDGE, true);
+        turn.request = connection.request("session/prompt", {
+          sessionId: this.record.sessionId,
+          prompt: [{ type: "text", text: PLAN_NUDGE }]
+        });
+        answer = await this.settle(turn, conversation);
+      }
       result = outcomeOf(answer?.stopReason);
-      void this.agent.recordUsage({
-        sessionId,
-        channelId: conversation.channel,
-        root: conversation.root,
-        observations: observationsOf(answer, this.state?.model)
-      });
     } catch (error) {
-      if (!turn.updated && this.record) {
+      if (!turn.updated) {
         prompt.restore();
-        Object.assign(this.record, before);
-        if (before.summary === void 0) delete this.record.summary;
+        if (this.record) this.record.cursor = before;
       }
       if (sessionLost(error, connection)) this.lose();
       if (this.agent.disposed || connection.stopped) result = STOPPED;
-      else if (!turn.updated && !retried && sessionLost(error, connection)) {
+      else if (!turn.updated && !retried && turn.receipts.length === 1 && sessionLost(error, connection)) {
         this.turn = void 0;
         this.starting = item;
         turn.record.end({ outcome: "error", error: `${errorText(error)} (retrying)` });
@@ -733,22 +755,25 @@ ${prompt.text}` : prompt.text,
   cursorOption() {
     return this.record?.cursor ? { cursor: this.record.cursor } : void 0;
   }
-  /** The model and permissions a turn ran with, as its transcript shows them. */
+  /** The model, thinking and permissions a turn runs with, as its
+   * transcript shows them. */
   configLabels() {
-    const model = this.state?.model;
-    const mode = MODES.find(([, , , id]) => id === this.state?.mode)?.[1];
-    return [model && (this.state?.names?.[model] ?? this.agent.modelLabel(model)), mode].filter(Boolean);
+    const named = (category) => {
+      const option = optionOf(this.options, category);
+      return choicesOf(option?.options).find((choice) => choice.value === option?.currentValue)?.name;
+    };
+    const mode = MODES.find(([id]) => id === this.mode)?.[1];
+    return [named("model"), named("thought_level") && `${named("thought_level")} thinking`, mode].filter(Boolean);
   }
-  // --- the Gemini session
-  /** Makes the session live for this turn: reuses it, loads it, or starts a
-   * new one, each with a fresh MCP server (a server takes one MCP session, so
-   * every new or loaded Gemini session needs its own). */
+  // --- the Antigravity session
+  /** Makes the session live for this turn: reuses it, resumes it, or starts
+   * a new one, each with a fresh MCP server (a server takes one MCP
+   * session, so every new or resumed Antigravity session needs its own). */
   async open(delivery, conversation, settings) {
     const agentHandle = delivery.agent;
     const connection = await this.agent.connect(agentHandle, settings);
     const cwd = await this.agent.workspace(settings);
     this.handler = this.agent.tools(agentHandle, conversation, cwd);
-    if (typeof conversation.where === "string") this.where = conversation.where;
     const shape = sessionShape(settings);
     if (this.live && this.connection === connection && this.record?.shape === shape) {
       this.agent.opened(this);
@@ -776,27 +801,31 @@ ${prompt.text}` : prompt.text,
       cwd,
       instructions: settings.instructions
     });
-    const params = sessionParams(cwd, mcp);
+    const params = sessionParams(cwd, mcp, this.system);
     let opened;
-    if (this.record?.sessionId && !this.record.compacted && connection.canLoad)
-      opened = await connection.request("session/load", { sessionId: this.record.sessionId, ...params }, SESSION_TIMEOUT_MS).catch((error) => {
+    if (this.record?.sessionId && connection.sessionCapabilities.resume)
+      opened = await connection.request("session/resume", { sessionId: this.record.sessionId, ...params }, START_TIMEOUT_MS).catch((error) => {
         if (connection.closed || !sessionGone(error)) throw error;
-        console.warn("gemini-acp: the saved session is gone; starting a new one", error);
+        console.warn("antigravity-acp: the saved session is gone; starting a new one", error);
         return void 0;
       });
-    if (opened) {
-      if (this.record.primed === void 0) this.record.primed = true;
-    } else {
-      const carried = this.record?.compacted ? { ...this.record.cursor ? { cursor: this.record.cursor } : {}, summary: this.record.summary } : {};
+    this.fresh = !opened;
+    if (!opened) {
       if (this.record) this.forget();
-      opened = await connection.request("session/new", params, SESSION_TIMEOUT_MS);
-      this.record = { sessionId: opened.sessionId, at: Date.now(), primed: false, ...carried };
+      opened = await connection.request("session/new", params, START_TIMEOUT_MS);
+      this.record = { sessionId: opened.sessionId, at: Date.now() };
     }
+    const tier = tierOf(opened);
+    if (tier) this.agent.runtime.catalog.sawTier(tier);
     this.record.shape = shape;
     this.record.whole = this.whole;
     if (this.where) this.record.where = this.where;
     this.connection = connection;
-    this.state = sessionState(opened);
+    this.options = opened.configOptions;
+    this.started = {
+      model: optionOf(this.options, "model")?.currentValue,
+      effort: optionOf(this.options, "thought_level")?.currentValue
+    };
     this.unsubscribe = connection.onSession(this.record.sessionId, (update) => this.update(update));
     this.live = true;
     this.save();
@@ -815,6 +844,7 @@ ${prompt.text}` : prompt.text,
     return answer.then((reply) => {
       const result = reply?.result;
       if (!reply?.error && !result?.isError) {
+        if (this.turn) this.turn.posted = true;
         const said = (Array.isArray(result?.content) ? result.content : []).map((part) => part?.text ?? "").join("\n");
         record.posted(call.arguments?.text, EVENT_ID.exec(said)?.[0]);
       }
@@ -822,26 +852,33 @@ ${prompt.text}` : prompt.text,
     });
   }
   update(update) {
+    if (update.sessionUpdate === "config_option_update" && Array.isArray(update.configOptions)) {
+      this.options = update.configOptions;
+      return;
+    }
     const turn = this.turn;
-    if (!turn || AMBIENT.has(update?.sessionUpdate)) return;
-    turn.updated = true;
+    if (!turn) return;
     turn.record?.update(update);
-    if (turn.compacting) {
-      if (update.sessionUpdate === "agent_message_chunk" && update.content?.type === "text" && !modeNote(update)) {
-        if (update._meta?.reset) turn.text = "";
-        turn.text += update.content.text;
+    if (AMBIENT.has(update.sessionUpdate)) return;
+    turn.updated = true;
+    if (update.sessionUpdate === "session_info_update") {
+      if (typeof update.title === "string" && update.title && !turn.named) {
+        turn.named = true;
+        for (const receipt of turn.receipts) receipt.named?.(update.title);
       }
       return;
     }
+    if (turn.compacting) return;
     const step = stepOf(update);
     if (!step) return;
     const label = `${step.tool}\0${step.target ?? ""}`;
     if (label === turn.step) return;
     turn.step = label;
-    turn.delivery?.step?.(step.tool, step.target);
+    turn.latest?.step?.(step.tool, step.target);
   }
-  /** The session can't be used as it is: the next turn opens it again. */
-  lose() {
+  /** The session can't be used as it is: the next turn opens it again.
+   * With `keep`, the process is left running for a close still to send. */
+  lose(keep = false) {
     this.live = false;
     this.unsubscribe?.();
     this.unsubscribe = void 0;
@@ -850,14 +887,19 @@ ${prompt.text}` : prompt.text,
     void mcp?.close().catch(() => {
     });
     this.agent.closed(this);
-    if (!this.busy) this.agent.idle();
+    if (!keep && !this.busy) this.agent.idle();
   }
-  /** Closes the session's MCP server, keeping the record so the next turn
-   * loads the session again. Gemini CLI has no way to close one session; it
-   * is let go of, and goes with its process once the agent is idle. */
+  /** Closes the session and its MCP server, keeping the record so the next
+   * turn resumes it. */
   async close() {
     clearTimeout(this.idleTimer);
-    this.lose();
+    const { connection, live } = this;
+    const sessionId = this.record?.sessionId;
+    this.lose(true);
+    if (live && sessionId && connection && !connection.closed && connection.sessionCapabilities.close)
+      await connection.request("session/close", { sessionId }, CLOSE_TIMEOUT_MS).catch(() => {
+      });
+    if (!this.busy) this.agent.idle();
   }
   /** Forgets the session: the next turn starts a new one. Its transcript
    * stays. */
@@ -888,7 +930,7 @@ ${prompt.text}` : prompt.text,
       }
     }
     if (this.starting && (!item || this.starting === item)) this.starting.stopped = true;
-    if (item && this.turn && this.turn.delivery !== item.delivery) return;
+    if (item && this.turn && !this.turn.receipts.includes(item.delivery)) return;
     if (this.turn && this.record && this.connection && !this.connection.closed)
       this.connection.notify("session/cancel", { sessionId: this.record.sessionId });
   }
@@ -909,55 +951,33 @@ ${prompt.text}` : prompt.text,
     this.agent.changed();
     this.agent.idle();
   }
-  /** Compacts the session: Gemini CLI has no compaction a client can ask
-   * for, so Gemini summarizes the session, and the next message starts a new
-   * session from that summary, shown no message twice. */
+  /** Compacts the session's history to free context, with Antigravity's own
+   * `/compact`. */
   async compact() {
     if (this.busy) throw new Error("Wait for the active turn to finish first.");
-    if (!this.record) throw new Error("This conversation has no Gemini session yet.");
+    if (!this.record) throw new Error("This conversation has no Antigravity session yet.");
     if (!this.live)
-      throw new Error("This conversation's Gemini session is closed. It opens again with the next message.");
+      throw new Error("This conversation's Antigravity session is closed. It opens again with the next message.");
     const turn = new Turn(void 0, { compacting: true });
-    const { connection } = this;
-    const { sessionId } = this.record;
     const [channelId, root] = this.key.split("/");
     turn.record = await this.agent.transcripts.begin(this.agent.key, this.key, {
-      sessionId,
+      sessionId: this.record.sessionId,
       newSession: false,
       channelId,
       root,
       config: this.configLabels()
     });
-    turn.record.status("Compacting: Gemini summarizes this session, and the next message starts a new one from the summary.");
+    turn.record.status("Compacting the session to free context.");
     this.turn = turn;
-    this.handler = void 0;
     this.agent.changed();
     try {
-      const answer = await connection.request("session/prompt", {
-        sessionId,
-        prompt: [{ type: "text", text: COMPACT_PROMPT }]
+      turn.request = this.connection.request("session/prompt", {
+        sessionId: this.record.sessionId,
+        prompt: [{ type: "text", text: "/compact" }]
       });
-      const outcome = outcomeOf(answer?.stopReason);
-      void this.agent.recordUsage({ sessionId, channelId, root, observations: observationsOf(answer, this.state?.model) });
-      if (outcome.stopped || !outcome.ok) {
-        turn.record.end({ outcome: transcriptOutcome(outcome), error: outcome.error });
-        turn.finish(outcome);
-        if (outcome.error) throw new Error(outcome.error);
-        return;
-      }
-      const summary = turn.text.trim();
-      if (!summary) throw new Error("Gemini returned no summary, so the session was kept.");
-      await this.close();
-      this.record = {
-        ...this.record,
-        compacted: true,
-        primed: false,
-        summary: summary.length > SUMMARY_LIMIT ? `${summary.slice(0, SUMMARY_LIMIT - 1)}\u2026` : summary,
-        at: Date.now()
-      };
-      this.save();
-      turn.record.end({ outcome: "ended" });
-      turn.finish({ ok: true });
+      const outcome = outcomeOf((await this.settle(turn, { channel: channelId, root }))?.stopReason);
+      turn.record.end({ outcome: transcriptOutcome(outcome), error: outcome.error });
+      turn.finish(outcome);
     } catch (error) {
       turn.record.end({ outcome: "error", error: errorText(error) });
       turn.finish({ ok: false, error: errorText(error) });
@@ -966,7 +986,6 @@ ${prompt.text}` : prompt.text,
       if (this.turn === turn) this.turn = void 0;
       this.agent.changed();
       void this.pump();
-      this.agent.idle();
     }
   }
   /** The agent is gone: stop quietly; its process is being stopped too. */
@@ -1025,8 +1044,8 @@ var AgentRuntime = class {
     if (this.records?.[own] || own === place.channelId) return own;
     return this.records?.[place.channelId]?.whole ? place.channelId : own;
   }
-  // --- the Gemini CLI process
-  /** The agent's Gemini CLI process, started on first use. */
+  // --- the Antigravity CLI process
+  /** The agent's Antigravity CLI process, started on first use. */
   async connect(agentHandle, settings) {
     if (this.disposed) throw new Error(REMOVED);
     if (this.connection && !this.connection.closed) return this.connection;
@@ -1035,7 +1054,11 @@ var AgentRuntime = class {
       const connection = await AcpConnection.start(this.host, {
         cwd,
         agent: agentHandle,
-        permissionMode: (sessionId) => this.modeOf(sessionId)
+        permissionMode: (sessionId) => this.modeOf(sessionId),
+        onDeclined: (sessionId) => {
+          for (const conversation of this.conversations.values())
+            if (conversation.record?.sessionId === sessionId && conversation.turn) conversation.turn.declined = true;
+        }
       });
       if (this.disposed) {
         void connection.stop();
@@ -1045,7 +1068,7 @@ var AgentRuntime = class {
         if (this.connection === connection) this.connection = void 0;
         for (const conversation of this.conversations.values())
           if (conversation.connection === connection) conversation.lose();
-        if (!stopped) console.warn(`gemini-acp: ${reason}`);
+        if (!stopped) console.warn(`antigravity-acp: ${reason}`);
         this.changed();
       });
       this.connection = connection;
@@ -1147,11 +1170,11 @@ var AgentRuntime = class {
   /** Tells the owner a turn failed, where the message was. */
   async report(item, error) {
     if (this.disposed) return;
-    await this.kit.reply(item.delivery.agent, item.conversation, `${TITLE} could not finish: ${error}`, { notifyOwner: true }).catch((reason) => console.warn("gemini-acp: could not report a failed turn", reason));
+    await this.kit.reply(item.delivery.agent, item.conversation, `${TITLE} could not finish: ${error}`, { notifyOwner: true }).catch((reason) => console.warn("antigravity-acp: could not report a failed turn", reason));
   }
   // --- standalone turns
   /** A watch's or timer's turn, in a one-off session that joins no
-   * conversation and is let go of after. */
+   * conversation and is closed after. */
   async runOnce({ delivery, signal, prompt, key }) {
     const settings = readConfig(delivery.config);
     const agentHandle = delivery.agent;
@@ -1166,7 +1189,7 @@ var AgentRuntime = class {
       if (signal.aborted) return { ok: false, error: "The turn was stopped before it started" };
       mcp = await this.host.serveMcp(this.tools(agentHandle, void 0, cwd));
       const system = await this.kit.systemPrompt(delivery, { scope: settings.scope, cwd, instructions: settings.instructions });
-      const created = await connection.request("session/new", sessionParams(cwd, mcp), SESSION_TIMEOUT_MS);
+      const created = await connection.request("session/new", sessionParams(cwd, mcp, system), START_TIMEOUT_MS);
       sessionId = created.sessionId;
       this.standalone.set(sessionId, settings.mode);
       this.starting -= 1;
@@ -1178,7 +1201,16 @@ var AgentRuntime = class {
         last = label;
         delivery.step?.(step.tool, step.target);
       });
-      const state = await applySettings(connection, sessionId, sessionState(created), wantedSettings(delivery, settings, this.defaults));
+      const started = {
+        model: optionOf(created.configOptions, "model")?.currentValue,
+        effort: optionOf(created.configOptions, "thought_level")?.currentValue
+      };
+      const options = await applyOptions(
+        connection,
+        sessionId,
+        created.configOptions,
+        wantedOptions(delivery, settings, this.defaults, started)
+      );
       const text = await prompt();
       if (text === void 0) return { ok: true };
       if (signal.aborted) return { ok: false, error: "The turn was stopped before it started" };
@@ -1187,11 +1219,10 @@ var AgentRuntime = class {
       try {
         const answer = await connection.request("session/prompt", {
           sessionId,
-          prompt: [{ type: "text", text: `${system}
-
-${this.kit.standalonePrompt(agentHandle, text)}` }]
+          prompt: [{ type: "text", text: turnText(this.kit.standalonePrompt(agentHandle, text), settings.mode) }]
         });
-        void this.recordUsage({ sessionId, wake: key, observations: observationsOf(answer, state.model) });
+        const model = optionOf(options, "model")?.currentValue;
+        void this.recordUsage({ sessionId, wake: key, observations: observationsOf(answer, model) });
         const outcome = outcomeOf(answer?.stopReason);
         return outcome.stopped ? { ok: false, error: "The turn was stopped" } : { ok: outcome.ok, ...outcome.error && { error: outcome.error } };
       } finally {
@@ -1202,6 +1233,9 @@ ${this.kit.standalonePrompt(agentHandle, text)}` }]
     } finally {
       if (!this.standalone.delete(sessionId)) this.starting -= 1;
       unsubscribe?.();
+      if (sessionId && connection && !connection.closed && connection.sessionCapabilities.close)
+        void connection.request("session/close", { sessionId }, CLOSE_TIMEOUT_MS).catch(() => {
+        });
       void mcp?.close().catch(() => {
       });
       this.idle();
@@ -1218,10 +1252,10 @@ ${this.kit.standalonePrompt(agentHandle, text)}` }]
 
 // src/runtime/catalog.js
 var CHECKING = Object.freeze({ readiness: "checking", models: [], loading: true });
-var SIGN_IN = "Sign in to Gemini";
-var SIGN_IN_HOW = "Sign in with the Google account of your Gemini subscription, or run gemini in a terminal and choose Sign in with Google, then check again.";
-var ACCOUNTS = "~/.gemini";
+var SIGN_IN = "Sign in to Antigravity";
+var SIGN_IN_HOW = "Sign in with the Google account that has your Google AI Pro or Ultra plan, or run agy in a terminal and sign in there, then check again.";
 var AUTH_URL = /https:\/\/accounts\.google\.com\/\S+/;
+var OFFERED = (level) => level.value !== "default";
 var Catalog = class {
   constructor(host, notify) {
     this.host = host;
@@ -1235,6 +1269,10 @@ var Catalog = class {
   set(change) {
     this.state = Object.freeze({ ...this.state, ...change });
     this.notify();
+  }
+  /** The plan a session said the account is on, once it changes. */
+  sawTier(tier) {
+    if (tier.id !== this.state.tier?.id || tier.name !== this.state.tier?.name) this.set({ tier });
   }
   /** Reads the catalog the first time anyone asks for it. */
   ensure() {
@@ -1256,7 +1294,13 @@ var Catalog = class {
         models: []
       })
     ).then((state) => {
-      this.state = Object.freeze({ ...state, loading: false, signingIn: Boolean(this.signingIn) });
+      this.state = Object.freeze({
+        ...state,
+        loading: false,
+        signingIn: Boolean(this.signingIn),
+        // Why the last sign-in failed, until one works.
+        ...this.state.signInError && state.readiness !== "ready" ? { signInError: this.state.signInError } : {}
+      });
       this.reading = void 0;
       this.notify();
       return this.state;
@@ -1275,7 +1319,7 @@ var Catalog = class {
     try {
       let created;
       try {
-        created = await connection.request("session/new", { cwd, mcpServers: [] }, SESSION_TIMEOUT_MS);
+        created = await connection.request("session/new", { cwd, mcpServers: [] }, START_TIMEOUT_MS);
       } catch (error) {
         if (connection.closed || !needsSignIn(error)) throw error;
         return {
@@ -1288,34 +1332,51 @@ var Catalog = class {
           models: []
         };
       }
-      const models = modelsOf(created).choices.map((choice) => ({
-        id: choice.value,
-        label: choice.name,
-        description: choice.description,
-        // Gemini CLI's ACP mode lets a client pick no thinking level: each
-        // model thinks as Gemini sets it up.
-        efforts: []
-      }));
-      return { readiness: "ready", account: await this.account(), models, default: modelsOf(created).current };
+      const models = await this.modelsOf(connection, created);
+      if (connection.sessionCapabilities.close)
+        await connection.request("session/close", { sessionId: created.sessionId }, CLOSE_TIMEOUT_MS).catch(() => {
+        });
+      const tier = tierOf(created);
+      return {
+        readiness: "ready",
+        models,
+        default: optionOf(created.configOptions, "model")?.currentValue,
+        canSignIn: connection.offersGoogleLogin,
+        canSwitch: connection.offersGoogleLogin && connection.canLogOut,
+        ...tier ? { tier } : {}
+      };
     } finally {
       void connection.stop();
     }
   }
-  /** The signed-in Google account, as Gemini CLI saved it, if it says. */
-  async account() {
-    try {
-      const folder = await this.host.resolveDirectory(ACCOUNTS);
-      const bytes = await this.host.readFile("google_accounts.json", { cwd: folder });
-      const active = JSON.parse(new TextDecoder().decode(bytes))?.active;
-      return typeof active === "string" && active ? active : void 0;
-    } catch {
-      return void 0;
+  /** Each model with the thinking levels it takes, read by switching the
+   * session to it, and the level it starts on. */
+  async modelsOf(connection, created) {
+    const { sessionId } = created;
+    let options = created.configOptions ?? [];
+    const models = [];
+    for (const choice of choicesOf(optionOf(options, "model")?.options)) {
+      const model = optionOf(options, "model");
+      if (model?.currentValue !== choice.value) {
+        const changed = await connection.request("session/set_config_option", { sessionId, configId: model.id, value: choice.value }, START_TIMEOUT_MS).catch(() => void 0);
+        if (Array.isArray(changed?.configOptions)) options = changed.configOptions;
+      }
+      const effort = optionOf(options, "thought_level");
+      models.push({
+        id: choice.value,
+        label: choice.name,
+        description: choice.description,
+        efforts: choicesOf(effort?.options).filter(OFFERED).map((level) => ({ id: level.value, label: level.name })),
+        ...effort?.currentValue && effort.currentValue !== "default" ? { effort: effort.currentValue } : {}
+      });
     }
+    return models;
   }
-  /** Signs in with a Google account in the browser, as `gemini` does, then
-   * reads the catalog again. Gemini CLI saves the sign-in for every later
-   * start, the terminal's included. */
-  signIn() {
+  /** Signs in with a Google account in the browser, as `agy` does, then
+   * reads the catalog again. With `switching`, the signed-in account is
+   * signed out first, so another one can sign in. Antigravity keeps the
+   * sign-in for every later start, the terminal's included. */
+  signIn({ switching = false } = {}) {
     if (this.signingIn) return this.signingIn;
     this.set({ signingIn: true, signInError: void 0, signInUrl: void 0 });
     this.signingIn = (async () => {
@@ -1330,9 +1391,11 @@ var Catalog = class {
             if (url && url !== this.state.signInUrl) this.set({ signInUrl: url });
           }
         });
-        if (!connection.offersGoogleLogin) throw new Error(`This Gemini CLI does not offer sign-in with Google.`);
-        await connection.request("authenticate", { methodId: GOOGLE_LOGIN }, SIGN_IN_TIMEOUT_MS);
-        this.set({ signInUrl: void 0 });
+        if (!connection.offersGoogleLogin) throw new Error("This Antigravity CLI does not offer sign-in with Google.");
+        if (switching && connection.canLogOut) await connection.request("logout", {}, START_TIMEOUT_MS);
+        const answer = await connection.request("authenticate", { methodId: GOOGLE_LOGIN }, SIGN_IN_TIMEOUT_MS);
+        const tier = tierOf(answer);
+        this.set({ signInUrl: void 0, ...tier ? { tier } : {} });
       } catch (error) {
         this.set({ signInError: errorText(error) });
       } finally {
@@ -1345,6 +1408,7 @@ var Catalog = class {
     return this.signingIn;
   }
 };
+var onFreeTier = (state) => state?.tier?.id === FREE_TIER;
 
 // src/runtime/defaults.js
 var VERSION = 1;
@@ -1375,7 +1439,7 @@ var DeviceDefaults = class {
     this.notify();
   }
   /** The model and effort a turn runs with: the agent's own, else this
-   * device's default, else Gemini's own. A default effort follows only the
+   * device's default, else Antigravity's own. A default effort follows only the
    * default model it was chosen for. */
   effective(settings) {
     const { model, effort } = this.current;
@@ -1427,7 +1491,7 @@ var SessionRecords = class {
         while (write.owed) {
           const next = write.owed;
           write.owed = void 0;
-          await this.write(agentKey, next).catch((error) => console.warn("gemini-acp: could not save sessions", error));
+          await this.write(agentKey, next).catch((error) => console.warn("antigravity-acp: could not save sessions", error));
         }
         write.running = void 0;
       })();
@@ -1451,11 +1515,13 @@ var ITEM_LIMIT = 400;
 var SAVE_MS = 2e3;
 var EVENT_ID2 = /^[0-9a-f]{64}$/;
 var clip = (text, limit = TEXT_LIMIT) => typeof text !== "string" ? "" : text.length > limit ? `${text.slice(0, limit - 1)}\u2026` : text;
-function contentOf(content) {
+function contentOf(content, rawOutput) {
   const texts = [];
   const diffs = [];
+  if (typeof rawOutput?.output === "string") texts.push(rawOutput.output);
+  else if (typeof rawOutput === "string") texts.push(rawOutput);
   for (const part of Array.isArray(content) ? content : []) {
-    if (part?.type === "content" && part.content?.type === "text") texts.push(part.content.text);
+    if (part?.type === "content" && part.content?.type === "text" && !texts.includes(part.content.text)) texts.push(part.content.text);
     if (part?.type === "diff" && typeof part.path === "string")
       diffs.push({
         path: part.path,
@@ -1532,7 +1598,7 @@ var TranscriptStore = class {
   async save(key) {
     const held = this.held.get(key);
     if (!held) return;
-    await this.store.set(key, JSON.stringify({ v: VERSION3, turns: held.turns })).catch((error) => console.warn("gemini-acp: could not save a transcript", error));
+    await this.store.set(key, JSON.stringify({ v: VERSION3, turns: held.turns })).catch((error) => console.warn("antigravity-acp: could not save a transcript", error));
   }
   /** Forgets a conversation's transcript. */
   async forget(agentKey, conversationKey) {
@@ -1574,6 +1640,10 @@ var TurnRecord = class {
     if (prompt !== void 0)
       this.add({ type: "prompt", ...askedBy(delivery, prompt), sections: promptSections(prompt), steer: false });
   }
+  /** A message steered into the turn. */
+  prompt(delivery, text, steer) {
+    this.add({ type: "prompt", ...askedBy(delivery, text), sections: promptSections(text), steer });
+  }
   add(item) {
     if (this.value.items.length >= ITEM_LIMIT) return void 0;
     const full = { id: `i${++this.next}`, at: Date.now(), ...item };
@@ -1593,7 +1663,7 @@ var TurnRecord = class {
       case "agent_message_chunk":
       case "agent_thought_chunk": {
         const text = update.content?.type === "text" ? update.content.text : "";
-        if (!text || modeNote(update)) return;
+        if (!text) return;
         const type = update.sessionUpdate === "agent_message_chunk" ? "message" : "thought";
         if (update._meta?.reset && this.open?.type === type) this.replace(this.open.id, () => ({ text: "" }));
         if (this.open?.type === type) {
@@ -1610,7 +1680,7 @@ var TurnRecord = class {
       case "tool_call_update": {
         const callId = typeof update.toolCallId === "string" ? update.toolCallId : "";
         if (buzzToolMessage(update)) return;
-        const { text, diffs } = contentOf(update.content);
+        const { text, diffs } = contentOf(update.content, update.rawOutput);
         const paths = Array.isArray(update.locations) ? update.locations.map((location) => location?.path).filter((path) => typeof path === "string") : void 0;
         const status = typeof update.status === "string" ? update.status : void 0;
         const ended = status === "completed" || status === "failed";
@@ -1623,7 +1693,7 @@ var TurnRecord = class {
             title: clip(typeof update.title === "string" && update.title ? update.title : name ?? "Tool", 400),
             kind: typeof update.kind === "string" ? update.kind : "other",
             status: status ?? "in_progress",
-            input: name && buzzToolOf(name) ? `buzz ${buzzToolOf(name)}` : name ?? "",
+            input: inputOf(update),
             output: clip(text, OUTPUT_LIMIT),
             diffs,
             paths: paths ?? [],
@@ -1684,8 +1754,16 @@ var TurnRecord = class {
   }
 };
 function buzzToolMessage(update) {
-  const tool = buzzToolOf(toolNameOf(update));
+  const tool = buzzToolOf(update);
   return tool === "send" || tool === "reply_in_subthread";
+}
+function inputOf(update) {
+  const name = toolNameOf(update) ?? "";
+  const input = update.rawInput && typeof update.rawInput === "object" ? update.rawInput : void 0;
+  if (!input) return name;
+  const { toolSummary, ...rest } = input;
+  void toolSummary;
+  return clip(`${name}${name ? " " : ""}${JSON.stringify(rest, null, 2)}`, OUTPUT_LIMIT);
 }
 
 // src/runtime/usage.js
@@ -1734,7 +1812,7 @@ var UsageBook = class {
   }
   save(agentKey) {
     const prior = this.writes.get(agentKey) ?? Promise.resolve();
-    const write = prior.then(() => this.store.set(this.key(agentKey), JSON.stringify({ v: VERSION4, sessions: this.held.get(agentKey) ?? {} }))).catch((error) => console.warn("gemini-acp: could not save usage", error));
+    const write = prior.then(() => this.store.set(this.key(agentKey), JSON.stringify({ v: VERSION4, sessions: this.held.get(agentKey) ?? {} }))).catch((error) => console.warn("antigravity-acp: could not save usage", error));
     this.writes.set(agentKey, write);
     return write;
   }
@@ -1870,7 +1948,7 @@ var Runtime = class {
       try {
         listener();
       } catch (error) {
-        console.warn("gemini-acp: a listener failed", error);
+        console.warn("antigravity-acp: a listener failed", error);
       }
     }
   }
@@ -1894,11 +1972,11 @@ var Runtime = class {
   }
 };
 
-// src/assets/gemini-logo.svg
-var gemini_logo_default = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">%0A  <defs><linearGradient id="gm-fill" x1="4" y1="4" x2="28" y2="28" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="%234C8DF6"/><stop offset="0.55" stop-color="%237C6CF2"/><stop offset="1" stop-color="%23A86CE4"/></linearGradient></defs>%0A  <path d="M16 2 C17.96 14.04 17.96 14.04 30 16 C17.96 17.96 17.96 17.96 16 30 C14.04 17.96 14.04 17.96 2 16 C14.04 14.04 14.04 14.04 16 2 Z" fill="url(%23gm-fill)"/>%0A</svg>';
+// src/assets/antigravity-logo.svg
+var antigravity_logo_default = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">%0A  <defs><linearGradient id="am-fill" x1="5" y1="0" x2="27" y2="0" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="%234285F4"/><stop offset="0.35" stop-color="%2334A853"/><stop offset="0.68" stop-color="%23FBBC04"/><stop offset="1" stop-color="%23EA4335"/></linearGradient></defs>%0A  <path d="M6.5 27 C6.5 11 11 5 16 5 C21 5 25.5 11 25.5 27" fill="none" stroke="url(%23am-fill)" stroke-width="5" stroke-linecap="round"/>%0A</svg>';
 
 // src/assets/harness-mark.svg
-var harness_mark_default = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">%0A  <defs>%0A    <linearGradient id="gh-fill" x1="1" y1="1" x2="27" y2="27" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="%234C8DF6"/><stop offset="0.55" stop-color="%237C6CF2"/><stop offset="1" stop-color="%23A86CE4"/></linearGradient>%0A    <mask id="gh-cut"><rect width="32" height="32" fill="%23fff"/><circle cx="25.3" cy="25.3" r="7.15" fill="%23000"/></mask>%0A  </defs>%0A  <path d="M14.2 0.8 C16.076 12.324 16.076 12.324 27.6 14.2 C16.076 16.076 16.076 16.076 14.2 27.6 C12.324 16.076 12.324 16.076 0.8 14.2 C12.324 12.324 12.324 12.324 14.2 0.8 Z" fill="url(%23gh-fill)" mask="url(%23gh-cut)"/>%0A  <circle cx="25.3" cy="25.3" r="5.9" fill="%236A5BE8"/>%0A  <g transform="translate(25.3 25.3)"><path d="M0 -2.85 V2.85 M-2.85 0 H2.85" stroke="%23F5F3FF" stroke-width="1.6" stroke-linecap="round"/></g>%0A</svg>';
+var harness_mark_default = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">%0A  <defs>%0A    <linearGradient id="ah-fill" x1="3" y1="0" x2="25" y2="0" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="%234285F4"/><stop offset="0.35" stop-color="%2334A853"/><stop offset="0.68" stop-color="%23FBBC04"/><stop offset="1" stop-color="%23EA4335"/></linearGradient>%0A    <mask id="ah-cut"><rect width="32" height="32" fill="%23fff"/><circle cx="25.3" cy="25.3" r="7.15" fill="%23000"/></mask>%0A  </defs>%0A  <path d="M4.5 26 C4.5 10 9 4 14 4 C19 4 23.5 10 23.5 26" fill="none" stroke="url(%23ah-fill)" stroke-width="5" stroke-linecap="round" mask="url(%23ah-cut)"/>%0A  <circle cx="25.3" cy="25.3" r="5.9" fill="%234285F4"/>%0A  <g transform="translate(25.3 25.3)"><path d="M0 -2.85 V2.85 M-2.85 0 H2.85" stroke="%23F5F8FF" stroke-width="1.6" stroke-linecap="round"/></g>%0A</svg>';
 
 // src/ui/react.js
 var React;
@@ -1946,7 +2024,7 @@ function picture(href) {
     return /* @__PURE__ */ h("svg", { width: rem(size), height: rem(size), viewBox: "0 0 32 32", xmlns: "http://www.w3.org/2000/svg", className, "aria-hidden": "true" }, /* @__PURE__ */ h("image", { href, width: "32", height: "32" }));
   };
 }
-var GeminiLogoIcon = picture(gemini_logo_default);
+var AntigravityLogoIcon = picture(antigravity_logo_default);
 var HarnessIcon = picture(harness_mark_default);
 
 // src/ui/controls.jsx
@@ -2075,10 +2153,10 @@ function Opened({ conversation, row: row2, onView }) {
     Row,
     {
       row: row2,
-      detail: [row2.status, row2.at && `Last active ${when(row2.at)}`].filter(Boolean).join(" \xB7 ") || "Gemini session",
+      detail: [row2.status, row2.at && `Last active ${when(row2.at)}`].filter(Boolean).join(" \xB7 ") || "Antigravity session",
       onView
     }
-  ) : /* @__PURE__ */ h("span", { style: { display: "grid", gap: "var(--space-1)" } }, /* @__PURE__ */ h("span", { className: "text-label" }, "No Gemini session here yet"), /* @__PURE__ */ h("span", { className: "text-body-sm text-subtle" }, "One starts when you mention the agent in this ", place, ".")))));
+  ) : /* @__PURE__ */ h("span", { style: { display: "grid", gap: "var(--space-1)" } }, /* @__PURE__ */ h("span", { className: "text-label" }, "No Antigravity session here yet"), /* @__PURE__ */ h("span", { className: "text-body-sm text-subtle" }, "One starts when you mention the agent in this ", place, ".")))));
 }
 function TranscriptView({ agent, row: row2, working, onBack }) {
   const Transcript = services.agents?.ui?.Transcript;
@@ -2095,7 +2173,7 @@ function TranscriptView({ agent, row: row2, working, onBack }) {
       working,
       reading: "Reading the transcript\u2026",
       missing: /* @__PURE__ */ h("p", { className: "text-body-sm text-subtle", style: { margin: 0 } }, "No turns recorded for this conversation on this device yet."),
-      failed: "Could not read the Gemini session"
+      failed: "Could not read the Antigravity session"
     }
   ) : /* @__PURE__ */ h("p", { className: "text-body-sm text-subtle", style: { margin: 0 } }, "Transcripts need a newer Buzz."));
 }
@@ -2401,20 +2479,20 @@ function useCatalog() {
   return { ...state, retry: () => void services.runtime.catalog.check() };
 }
 var useDefaults = () => useSyncExternalStore(subscribe, defaultsNow);
-var logo = () => /* @__PURE__ */ h(GeminiLogoIcon, { size: 20 });
-function modelChoices(catalog, defaults, value, { geminiDefaultOnly = false } = {}) {
+var logo = () => /* @__PURE__ */ h(AntigravityLogoIcon, { size: 20 });
+function modelChoices(catalog, defaults, value, { providerDefaultOnly = false } = {}) {
   const fallback = catalog.models.find((model) => model.id === catalog.default);
-  const geminiDefault = fallback?.label || "Gemini default";
-  const preferred = !geminiDefaultOnly && defaults.model && catalog.models.find((model) => model.id === defaults.model);
-  const defaultName = preferred?.label || (defaults.model && !geminiDefaultOnly ? defaults.model : geminiDefault);
+  const providerDefault = fallback?.label || "Antigravity default";
+  const preferred = !providerDefaultOnly && defaults.model && catalog.models.find((model) => model.id === defaults.model);
+  const defaultName = preferred?.label || (defaults.model && !providerDefaultOnly ? defaults.model : providerDefault);
   const listed = catalog.models.filter(
-    (model) => geminiDefaultOnly || model.id !== (defaults.model || catalog.default) || model.id === value
+    (model) => providerDefaultOnly || model.id !== (defaults.model || catalog.default) || model.id === value
   );
   const options = [
     {
       value: "",
-      label: geminiDefaultOnly ? geminiDefault : `${defaultName} \xB7 Default`,
-      description: geminiDefaultOnly ? "Use Gemini default" : "Following the provider's model default",
+      label: providerDefaultOnly ? providerDefault : `${defaultName} \xB7 Default`,
+      description: providerDefaultOnly ? "Use Antigravity default" : "Following the provider's model default",
       leading: logo()
     },
     ...listed.map((model) => ({ value: model.id, label: model.label, description: model.description, leading: logo() }))
@@ -2424,8 +2502,8 @@ function modelChoices(catalog, defaults, value, { geminiDefaultOnly = false } = 
   const chosen = options.find((option) => option.value === value) ?? options[0];
   return {
     options,
-    valueLabel: catalog.loading && !catalog.models.length ? "Loading models\u2026" : catalog.signedOut && !catalog.models.length ? "Not signed in" : value ? chosen.label : geminiDefaultOnly ? geminiDefault : defaultName,
-    valueSuffix: !value && !geminiDefaultOnly && !catalog.loading && catalog.models.length ? " \xB7 Default" : void 0,
+    valueLabel: catalog.loading && !catalog.models.length ? "Loading models\u2026" : catalog.signedOut && !catalog.models.length ? "Not signed in" : value ? chosen.label : providerDefaultOnly ? providerDefault : defaultName,
+    valueSuffix: !value && !providerDefaultOnly && !catalog.loading && catalog.models.length ? " \xB7 Default" : void 0,
     valueTitle: chosen.label
   };
 }
@@ -2435,7 +2513,7 @@ function thinkingChoices(catalog, defaults, current) {
   return [
     { value: "", label: "Automatic \xB7 Default" },
     ...current.effort && !efforts.some((level) => level.id === current.effort) ? [{ value: current.effort, label: catalog.models.length ? `${effortLabel(current.effort)} (unavailable)` : effortLabel(current.effort) }] : [],
-    ...efforts.map((level) => ({ value: level.id, label: effortLabel(level.id) }))
+    ...efforts.map((level) => ({ value: level.id, label: level.label || effortLabel(level.id) }))
   ];
 }
 var withModel = (catalog, defaults, current, model) => ({
@@ -2555,7 +2633,7 @@ function DefaultControl({ onConfigure }) {
     () => setError(""),
     (reason) => setError(errorText(reason))
   );
-  const models = modelChoices(catalog, defaults, defaults.model, { geminiDefaultOnly: true });
+  const models = modelChoices(catalog, defaults, defaults.model, { providerDefaultOnly: true });
   const efforts = effortsOf(catalog, defaults, defaults.model);
   const busy = catalog.loading && !catalog.models.length;
   return /* @__PURE__ */ h(Fragment, null, /* @__PURE__ */ h("div", { style: row }, /* @__PURE__ */ h(
@@ -2566,7 +2644,7 @@ function DefaultControl({ onConfigure }) {
       options: models.options,
       valueLabel: models.valueLabel,
       valueTitle: models.valueTitle,
-      leading: /* @__PURE__ */ h(GeminiLogoIcon, { size: 20 }),
+      leading: /* @__PURE__ */ h(AntigravityLogoIcon, { size: 20 }),
       align: "end",
       disabled: busy,
       onValueChange: (model) => save({ model, effort: effortsOf(catalog, defaults, model).some((level) => level.id === defaults.effort) ? defaults.effort : "" })
@@ -2589,8 +2667,10 @@ function ProviderDialogBody({ onClose }) {
   const ready = catalog.readiness === "ready";
   const checking = catalog.readiness === "checking";
   const signingIn = Boolean(catalog.signingIn);
-  const line = signingIn ? "Finish signing in with Google in your browser\u2026" : checking ? "Checking Gemini\u2026" : ready ? `Signed in with your Google account${catalog.account ? ` (${catalog.account})` : ""}.` : catalog.attentionDescription;
-  return /* @__PURE__ */ h("div", { style: stack("var(--space-6)") }, /* @__PURE__ */ h("div", { style: stack("var(--space-2)") }, /* @__PURE__ */ h("p", { role: catalog.readiness === "attention" && !signingIn ? "alert" : "status", className: "text-body-sm text-primary", style: { margin: 0 } }, /* @__PURE__ */ h("strong", null, line)), signingIn && catalog.signInUrl && /* @__PURE__ */ h("p", { className: "text-body-sm text-subtle", style: { margin: 0, overflowWrap: "anywhere" } }, "If no browser opened, open", " ", /* @__PURE__ */ h("a", { href: catalog.signInUrl, target: "_blank", rel: "noreferrer" }, "Google's sign-in page"), "."), catalog.signInError && !signingIn && /* @__PURE__ */ h("p", { role: "alert", className: "text-body-sm text-danger", style: { margin: 0 } }, "Couldn't sign in: ", catalog.signInError), /* @__PURE__ */ h("p", { className: "text-body-sm text-subtle", style: { margin: 0 } }, TITLE, " runs Gemini CLI with the Google sign-in on this computer, so a Google AI Pro or Ultra subscription is used, not an API key. Change accounts with /auth in gemini in a terminal.")), ready && /* @__PURE__ */ h(SettingsGroup, null, /* @__PURE__ */ h(PreferenceRow, { title: "Default model", trailing: /* @__PURE__ */ h(DefaultControl, null) })), /* @__PURE__ */ h("div", { style: { ...row, justifyContent: "flex-end" } }, /* @__PURE__ */ h(Button, { onClick: onClose }, ready ? "Done" : "Cancel"), !ready && catalog.canSignIn && /* @__PURE__ */ h(Button, { variant: "prominent", loading: signingIn, disabled: checking, onClick: () => void services.runtime.catalog.signIn() }, "Sign in with Google"), !ready && /* @__PURE__ */ h(Button, { variant: catalog.canSignIn ? "subtle" : "prominent", loading: checking, disabled: signingIn, onClick: catalog.retry }, "Check again")));
+  const free = ready && onFreeTier(catalog);
+  const signIn = (switching) => void services.runtime.catalog.signIn({ switching });
+  const line = signingIn ? "Finish signing in with Google in your browser\u2026" : checking ? "Checking Antigravity\u2026" : ready ? `Signed in with Google${catalog.tier ? ` \xB7 ${catalog.tier.name}` : ""}.` : catalog.attentionDescription;
+  return /* @__PURE__ */ h("div", { style: stack("var(--space-6)") }, /* @__PURE__ */ h("div", { style: stack("var(--space-2)") }, /* @__PURE__ */ h("p", { role: catalog.readiness === "attention" && !signingIn ? "alert" : "status", className: "text-body-sm text-primary", style: { margin: 0 } }, /* @__PURE__ */ h("strong", null, line)), free && !signingIn && /* @__PURE__ */ h("p", { role: "alert", className: "text-body-sm text-warning", style: { margin: 0 } }, "This Google account has no Google AI Pro or Ultra plan, so agents run on Antigravity's free quota. Google Workspace accounts don't include one. Switch to the account with your plan."), signingIn && catalog.signInUrl && /* @__PURE__ */ h("p", { className: "text-body-sm text-subtle", style: { margin: 0, overflowWrap: "anywhere" } }, "If no browser opened, open", " ", /* @__PURE__ */ h("a", { href: catalog.signInUrl, target: "_blank", rel: "noreferrer" }, "Google's sign-in page"), "."), catalog.signInError && !signingIn && /* @__PURE__ */ h("p", { role: "alert", className: "text-body-sm text-danger", style: { margin: 0 } }, "Couldn't sign in: ", catalog.signInError), /* @__PURE__ */ h("p", { className: "text-body-sm text-subtle", style: { margin: 0 } }, TITLE, " runs Google's Antigravity CLI with the Google sign-in on this computer, so your Google AI Pro or Ultra plan is used, not an API key. The sign-in is shared with agy in a terminal.")), ready && /* @__PURE__ */ h(SettingsGroup, null, /* @__PURE__ */ h(PreferenceRow, { title: "Default model", trailing: /* @__PURE__ */ h(DefaultControl, null) })), /* @__PURE__ */ h("div", { style: { ...row, justifyContent: "flex-end" } }, /* @__PURE__ */ h(Button, { onClick: onClose }, ready ? "Done" : "Cancel"), ready && catalog.canSwitch && /* @__PURE__ */ h(Button, { variant: free ? "prominent" : "subtle", loading: signingIn, onClick: () => signIn(true) }, "Switch account"), !ready && catalog.canSignIn && /* @__PURE__ */ h(Button, { variant: "prominent", loading: signingIn, disabled: checking, onClick: () => signIn(false) }, "Sign in with Google"), !ready && /* @__PURE__ */ h(Button, { variant: catalog.canSignIn ? "subtle" : "prominent", loading: checking, disabled: signingIn, onClick: catalog.retry }, "Check again")));
 }
 var providerOf = () => ({
   // Stable until the catalog changes: it is replaced, never changed.
@@ -2699,7 +2779,7 @@ function SettingsTab({ agent, save, settingsHost, settingsSection, settingsConte
         onChange: (instructions) => setDraft({ ...draft, instructions })
       }
     ))),
-    settingsSection !== "identity" && /* @__PURE__ */ h(Fragment, null, ["workspace", "scope", "mode"].filter((field) => conflicts.includes(field)).map((field) => /* @__PURE__ */ h(Conflict, { key: field, field, latest, draft, resolve, disabled: saving })), /* @__PURE__ */ h("div", { style: stack("var(--space-2)") }, /* @__PURE__ */ h(Field, { label: "Workspace", description: "The folder Gemini works in. Use ~/ for your home folder." }, (control) => /* @__PURE__ */ h(
+    settingsSection !== "identity" && /* @__PURE__ */ h(Fragment, null, ["workspace", "scope", "mode"].filter((field) => conflicts.includes(field)).map((field) => /* @__PURE__ */ h(Conflict, { key: field, field, latest, draft, resolve, disabled: saving })), /* @__PURE__ */ h("div", { style: stack("var(--space-2)") }, /* @__PURE__ */ h(Field, { label: "Workspace", description: "The folder Antigravity works in. Use ~/ for your home folder." }, (control) => /* @__PURE__ */ h(
       Input,
       {
         ...control,
@@ -2761,7 +2841,7 @@ function apply(ctx) {
     id: TYPE_ID,
     title: TITLE,
     icon: HarnessIcon,
-    description: "Gemini on this computer, signed in with your own Google account. Each thread it is mentioned in is one continuing session.",
+    description: "Google's Antigravity agent on this computer, on your own Google AI Pro or Ultra plan. Each thread it is mentioned in is one continuing session.",
     defaults: () => ({ config: { ...DEFAULTS } }),
     summary: (agent) => readConfig(agent.config).model || TITLE,
     // New agent
@@ -2775,8 +2855,8 @@ function apply(ctx) {
     adopt,
     carry,
     describeMigration,
-    exportShared: (saved) => ({ runtime: "gemini", model: readConfig(saved).model }),
-    importShared: (source) => source.runtime === "gemini" ? { ...DEFAULTS, model: source.model ?? "" } : void 0,
+    exportShared: (saved) => ({ runtime: "antigravity", model: readConfig(saved).model }),
+    importShared: (source) => source.runtime === "antigravity" ? { ...DEFAULTS, model: source.model ?? "" } : void 0,
     syncedSettings: { schema: SYNCED_SCHEMA, withSynced: withSyncedSettings },
     // Settings and views
     tabs: [
@@ -2785,7 +2865,7 @@ function apply(ctx) {
     ],
     provider: providerOf(),
     sessions: { list: (key) => runtime.sessionList(key), subscribe: runtime.subscribe },
-    // Gemini reports each turn's tokens; they are kept as they come.
+    // Antigravity reports each turn's tokens; they are kept as they come.
     usage: (agent, options) => runtime.usage.read(agent.key, options),
     models: (agent) => runtime.models(agent),
     // Running

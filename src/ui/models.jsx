@@ -1,7 +1,7 @@
 // Model and Thinking pickers, as Buzz's own harnesses list them: the default
 // first, then each model; a model's own thinking levels, Automatic first.
 import { effortLabel } from "../acp/protocol.js";
-import { GeminiLogoIcon } from "./icons.jsx";
+import { AntigravityLogoIcon } from "./icons.jsx";
 import { h, useEffect, useSyncExternalStore } from "./react.js";
 import { Select } from "./select.jsx";
 import { services } from "./services.js";
@@ -10,7 +10,7 @@ const subscribe = (listener) => services.runtime.subscribe(listener);
 const catalogNow = () => services.runtime.catalog.snapshot();
 const defaultsNow = () => services.runtime.defaults.snapshot();
 
-/** What Gemini offers, read once and kept: never "Loading" twice. */
+/** What Antigravity offers, read once and kept: never "Loading" twice. */
 export function useCatalog() {
   const state = useSyncExternalStore(subscribe, catalogNow);
   useEffect(() => {
@@ -21,24 +21,24 @@ export function useCatalog() {
 
 export const useDefaults = () => useSyncExternalStore(subscribe, defaultsNow);
 
-/** Gemini's mark beside each model. Made when rendered: nothing runs at load. */
-const logo = () => <GeminiLogoIcon size={20} />;
+/** Antigravity's mark beside each model. Made when rendered: nothing runs at load. */
+const logo = () => <AntigravityLogoIcon size={20} />;
 
 /** The model choices, with `""` for "the default": this device's default
- * model if one is set, else Gemini's own (the one Gemini CLI starts on). */
-export function modelChoices(catalog, defaults, value, { geminiDefaultOnly = false } = {}) {
+ * model if one is set, else Antigravity's own (the one a session starts on). */
+export function modelChoices(catalog, defaults, value, { providerDefaultOnly = false } = {}) {
   const fallback = catalog.models.find((model) => model.id === catalog.default);
-  const geminiDefault = fallback?.label || "Gemini default";
-  const preferred = !geminiDefaultOnly && defaults.model && catalog.models.find((model) => model.id === defaults.model);
-  const defaultName = preferred?.label || (defaults.model && !geminiDefaultOnly ? defaults.model : geminiDefault);
+  const providerDefault = fallback?.label || "Antigravity default";
+  const preferred = !providerDefaultOnly && defaults.model && catalog.models.find((model) => model.id === defaults.model);
+  const defaultName = preferred?.label || (defaults.model && !providerDefaultOnly ? defaults.model : providerDefault);
   const listed = catalog.models.filter(
-    (model) => geminiDefaultOnly || model.id !== (defaults.model || catalog.default) || model.id === value,
+    (model) => providerDefaultOnly || model.id !== (defaults.model || catalog.default) || model.id === value,
   );
   const options = [
     {
       value: "",
-      label: geminiDefaultOnly ? geminiDefault : `${defaultName} · Default`,
-      description: geminiDefaultOnly ? "Use Gemini default" : "Following the provider's model default",
+      label: providerDefaultOnly ? providerDefault : `${defaultName} · Default`,
+      description: providerDefaultOnly ? "Use Antigravity default" : "Following the provider's model default",
       leading: logo(),
     },
     ...listed.map((model) => ({ value: model.id, label: model.label, description: model.description, leading: logo() })),
@@ -55,10 +55,10 @@ export function modelChoices(catalog, defaults, value, { geminiDefaultOnly = fal
           ? "Not signed in"
           : value
             ? chosen.label
-            : geminiDefaultOnly
-              ? geminiDefault
+            : providerDefaultOnly
+              ? providerDefault
               : defaultName,
-    valueSuffix: !value && !geminiDefaultOnly && !catalog.loading && catalog.models.length ? " · Default" : undefined,
+    valueSuffix: !value && !providerDefaultOnly && !catalog.loading && catalog.models.length ? " · Default" : undefined,
     valueTitle: chosen.label,
   };
 }
@@ -74,7 +74,7 @@ export function thinkingChoices(catalog, defaults, current) {
     ...(current.effort && !efforts.some((level) => level.id === current.effort)
       ? [{ value: current.effort, label: catalog.models.length ? `${effortLabel(current.effort)} (unavailable)` : effortLabel(current.effort) }]
       : []),
-    ...efforts.map((level) => ({ value: level.id, label: effortLabel(level.id) })),
+    ...efforts.map((level) => ({ value: level.id, label: level.label || effortLabel(level.id) })),
   ];
 }
 

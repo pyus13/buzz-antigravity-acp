@@ -24,5 +24,5 @@ jobs:
         run: npm run check
       - name: Icons match their sources
         run: npm run icons -- --check
-      - name: The manifest pins Gemini CLI
-        run: node -e "const p=require('./plugin/manifest.json').host.processes[0]; if (p.program!=='npx' || !/^@google\/gemini-cli@\d+\.\d+\.\d+$/.test(p.args[1]) || p.args.at(-1)!=='--acp') process.exit(1)"
+      - name: The manifest starts agy's ACP server
+        run: node -e "const p=require('./plugin/manifest.json').host.processes[0]; if (p.program!=='agy' || p.args[0]!=='acp' || !p.args.includes('--process-per-session')) process.exit(1)"

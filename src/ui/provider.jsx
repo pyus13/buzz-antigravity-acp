@@ -1,9 +1,11 @@
 // Settings → Agent setup: the harness's row (its default model once ready)
-// and its dialog (how Gemini is signed in, and signing in).
+// and its dialog (which Google account and plan Antigravity runs on, and
+// signing in or switching accounts).
 import { effortLabel, errorText } from "../acp/protocol.js";
 import { TITLE } from "../constants.js";
+import { onFreeTier } from "../runtime/catalog.js";
 import { Button, PreferenceRow, row, SettingsGroup, stack } from "./controls.jsx";
-import { GeminiLogoIcon } from "./icons.jsx";
+import { AntigravityLogoIcon } from "./icons.jsx";
 import { effortsOf, modelChoices, useCatalog, useDefaults } from "./models.jsx";
 import { Fragment, h, useState } from "./react.js";
 import { Select } from "./select.jsx";
@@ -20,7 +22,7 @@ export function DefaultControl({ onConfigure }) {
       () => setError(""),
       (reason) => setError(errorText(reason)),
     );
-  const models = modelChoices(catalog, defaults, defaults.model, { geminiDefaultOnly: true });
+  const models = modelChoices(catalog, defaults, defaults.model, { providerDefaultOnly: true });
   const efforts = effortsOf(catalog, defaults, defaults.model);
   const busy = catalog.loading && !catalog.models.length;
   return (
@@ -32,7 +34,7 @@ export function DefaultControl({ onConfigure }) {
           options={models.options}
           valueLabel={models.valueLabel}
           valueTitle={models.valueTitle}
-          leading={<GeminiLogoIcon size={20} />}
+          leading={<AntigravityLogoIcon size={20} />}
           align="end"
           disabled={busy}
           onValueChange={(model) =>
@@ -66,12 +68,14 @@ export function ProviderDialogBody({ onClose }) {
   const ready = catalog.readiness === "ready";
   const checking = catalog.readiness === "checking";
   const signingIn = Boolean(catalog.signingIn);
+  const free = ready && onFreeTier(catalog);
+  const signIn = (switching) => void services.runtime.catalog.signIn({ switching });
   const line = signingIn
     ? "Finish signing in with Google in your browser…"
     : checking
-      ? "Checking Gemini…"
+      ? "Checking Antigravity…"
       : ready
-        ? `Signed in with your Google account${catalog.account ? ` (${catalog.account})` : ""}.`
+        ? `Signed in with Google${catalog.tier ? ` · ${catalog.tier.name}` : ""}.`
         : catalog.attentionDescription;
   return (
     <div style={stack("var(--space-6)")}>
@@ -79,6 +83,12 @@ export function ProviderDialogBody({ onClose }) {
         <p role={catalog.readiness === "attention" && !signingIn ? "alert" : "status"} className="text-body-sm text-primary" style={{ margin: 0 }}>
           <strong>{line}</strong>
         </p>
+        {free && !signingIn && (
+          <p role="alert" className="text-body-sm text-warning" style={{ margin: 0 }}>
+            This Google account has no Google AI Pro or Ultra plan, so agents run on Antigravity's free quota. Google Workspace
+            accounts don't include one. Switch to the account with your plan.
+          </p>
+        )}
         {signingIn && catalog.signInUrl && (
           <p className="text-body-sm text-subtle" style={{ margin: 0, overflowWrap: "anywhere" }}>
             If no browser opened, open{" "}
@@ -94,8 +104,8 @@ export function ProviderDialogBody({ onClose }) {
           </p>
         )}
         <p className="text-body-sm text-subtle" style={{ margin: 0 }}>
-          {TITLE} runs Gemini CLI with the Google sign-in on this computer, so a Google AI Pro or Ultra subscription is used, not
-          an API key. Change accounts with /auth in gemini in a terminal.
+          {TITLE} runs Google's Antigravity CLI with the Google sign-in on this computer, so your Google AI Pro or Ultra plan is
+          used, not an API key. The sign-in is shared with agy in a terminal.
         </p>
       </div>
       {ready && (
@@ -105,8 +115,13 @@ export function ProviderDialogBody({ onClose }) {
       )}
       <div style={{ ...row, justifyContent: "flex-end" }}>
         <Button onClick={onClose}>{ready ? "Done" : "Cancel"}</Button>
+        {ready && catalog.canSwitch && (
+          <Button variant={free ? "prominent" : "subtle"} loading={signingIn} onClick={() => signIn(true)}>
+            Switch account
+          </Button>
+        )}
         {!ready && catalog.canSignIn && (
-          <Button variant="prominent" loading={signingIn} disabled={checking} onClick={() => void services.runtime.catalog.signIn()}>
+          <Button variant="prominent" loading={signingIn} disabled={checking} onClick={() => signIn(false)}>
             Sign in with Google
           </Button>
         )}

@@ -1,26 +1,30 @@
-// Small, pure pieces of the Agent Client Protocol as Gemini CLI speaks it.
+// Small, pure pieces of the Agent Client Protocol as Antigravity CLI speaks it.
 
-/** Gemini CLI's own tools, as Buzz shows them in a step. Its Buzz tools are
- * `mcp_buzz_<tool>` and show as `<tool>`, as Buzz's other harnesses show them. */
+const EVENT = "buzz-event";
+const STEER = "new-message-arrived-while-you-were-working";
+const STEER_NOTE =
+  "Note: A new message arrived while you were working. Continue your in-progress work and incorporate the new message if it's relevant; if it's unrelated, you may briefly acknowledge it and carry on.";
+
+/** Antigravity's own tools, as Buzz shows them in a step. Its Buzz tools
+ * show by their own names (`send`), as Buzz's Claude shows them. */
 const TOOL_LABELS = Object.freeze({
-  read_file: "Read",
-  read_many_files: "Read",
-  write_file: "Write",
-  replace: "Edit",
-  edit: "Edit",
-  run_shell_command: "Shell",
-  list_directory: "List",
-  glob: "Glob",
+  view_file: "Read",
+  view_file_outline: "Read",
+  view_code_item: "Read",
+  write_to_file: "Write",
+  replace_file_content: "Edit",
+  multi_replace_file_content: "Edit",
+  run_command: "Shell",
+  command_status: "Shell",
+  send_command_input: "Shell",
+  list_dir: "List",
+  find_by_name: "Find",
   grep_search: "Search",
-  search_file_content: "Search",
-  google_web_search: "Web search",
-  web_fetch: "Fetch",
-  save_memory: "Memory",
-  write_todos: "Todos",
-  enter_plan_mode: "Plan",
-  exit_plan_mode: "Plan",
-  ask_user: "Ask",
-  activate_skill: "Skill",
+  codebase_search: "Search",
+  search_web: "Web search",
+  read_url_content: "Fetch",
+  browser_subagent: "Browser",
+  generate_image: "Image",
 });
 const KIND_LABELS = Object.freeze({
   read: "Read",
@@ -34,31 +38,40 @@ const KIND_LABELS = Object.freeze({
   switch_mode: "Plan",
 });
 const TARGET_LIMIT = 80;
-/** Said in the session when its approval mode changes, not meant for anyone. */
-const MODE_NOTE = /^\[MODE_UPDATE\]/;
+/** Tool inputs that name what a step acts on, in the order they are tried. */
+const STEP_TARGETS = ["AbsolutePath", "TargetFile", "DirectoryPath", "SearchPath", "Query", "Url", "CommandLine", "path", "query", "url", "command"];
+/** Kinds of tool that change something, which Plan never allows. */
+const CHANGES = new Set(["edit", "delete", "move", "execute"]);
 
-/** The tool a `tool_call` (or a permission prompt's `toolCall`) runs, by its
- * Gemini name: from the server and tool an MCP prompt names, else from its
- * call id, which Gemini makes as `<tool>_<time>_<n>` when the model gives
- * none. Undefined when neither says. */
-export function toolNameOf(call) {
-  const mcp = call?._meta?.["gemini-cli"]?.mcp;
-  if (typeof mcp?.server_name === "string" && typeof mcp?.tool_name === "string")
-    return `mcp_${mcp.server_name}_${mcp.tool_name}`;
-  const id = typeof call?.toolCallId === "string" ? call.toolCallId : "";
-  const named = /^(.+?)[_-]\d{10,}[_-]\d+$/.exec(id)?.[1];
-  if (named && !named.startsWith("synth_")) return named;
-  // An MCP tool's title is `<tool>(<arguments>)`; Buzz's message tools are
-  // known by theirs when the call id doesn't say.
-  const message = /^(send|reply_in_subthread)\(/.exec(typeof call?.title === "string" ? call.title : "")?.[1];
-  return message ? `mcp_buzz_${message}` : undefined;
+/** A turn's prompt as a message steered into the running turn, as Buzz's own
+ * Claude words it. */
+export function steerPrompt(turn) {
+  const open = `\n<${EVENT}>\n`;
+  const close = `\n</${EVENT}>`;
+  const once = (text) => turn.includes(text) && turn.indexOf(text) === turn.lastIndexOf(text);
+  const steered =
+    once(open) && once(close)
+      ? turn.replace(open, `\n<${STEER}>\n`).replace(close, `\n</${STEER}>`)
+      : `<${STEER}>\n${turn.trim()}\n</${STEER}>`;
+  return `${steered}\n\n${STEER_NOTE}`;
 }
 
-/** A Buzz tool's own name (`send`), when `name` is one. */
-export const buzzToolOf = (name) => (typeof name === "string" ? /^mcp_buzz_(\w+)$/.exec(name)?.[1] : undefined);
+/** The tool a `tool_call` (or a permission prompt's `toolCall`) runs, by the
+ * name Antigravity gives it. */
+export const toolNameOf = (call) => (typeof call?.name === "string" && call.name ? call.name : undefined);
+
+/** A Buzz tool's own name (`send`), when the call is one: Antigravity names
+ * an MCP tool by its server and tool. */
+export function buzzToolOf(call) {
+  const name = toolNameOf(call) ?? "";
+  const named = /^(?:mcp[_:]+)?buzz(?:__|_|\/|:|\.)(\w+)$/.exec(name)?.[1];
+  if (named) return named;
+  const mcp = call?._meta?.antigravity?.mcp ?? call?.rawInput?.__mcp;
+  return mcp?.server === "buzz" && typeof mcp.tool === "string" ? mcp.tool : undefined;
+}
 
 const short = (text) => {
-  const line = text.split("\n")[0].trim();
+  const line = String(text).split("\n")[0].trim();
   const tail = line.startsWith("/") ? line.split("/").at(-1) || line : line;
   return tail.length > TARGET_LIMIT ? `${tail.slice(0, TARGET_LIMIT - 1)}…` : tail;
 };
@@ -67,108 +80,94 @@ const short = (text) => {
 export function stepOf(update) {
   switch (update?.sessionUpdate) {
     case "tool_call": {
-      const name = toolNameOf(update);
-      const buzz = buzzToolOf(name);
+      const buzz = buzzToolOf(update);
       if (buzz) return { tool: buzz };
-      const title = typeof update.title === "string" ? update.title.trim() : "";
-      const tool = TOOL_LABELS[name] ?? KIND_LABELS[update.kind] ?? (name ? name.replace(/^mcp_/, "") : "Tool");
-      const target = title && title !== name ? short(title) : "";
-      return target ? { tool, target } : { tool };
+      const name = toolNameOf(update);
+      const tool = TOOL_LABELS[name] ?? KIND_LABELS[update.kind] ?? (name || "Tool");
+      const input = update.rawInput && typeof update.rawInput === "object" ? update.rawInput : {};
+      const target =
+        STEP_TARGETS.map((key) => input[key]).find((value) => typeof value === "string" && value) ??
+        (typeof update.title === "string" && update.title !== name ? update.title : "");
+      return target ? { tool, target: short(target) } : { tool };
     }
     case "agent_thought_chunk":
       return { tool: "Thinking" };
     case "agent_message_chunk":
-      return MODE_NOTE.test(update.content?.text ?? "") ? undefined : { tool: "Writing reply" };
+      return { tool: "Writing reply" };
     default:
       return undefined;
   }
 }
 
-/** Whether an agent message chunk only reports a mode change. */
-export const modeNote = (update) => MODE_NOTE.test(update?.content?.text ?? "");
-
 /** The answer to `session/request_permission`. Buzz has no one to ask in the
  * middle of a turn, so the agent's permission mode, the owner's choice,
- * decides:
- * - Gemini's own question tool is declined: the agent asks in Buzz instead.
- * - In Plan, leaving plan mode is declined, so the plan stands and changes
- *   nothing; anything else Gemini still asks about is allowed once.
- * - Anything else is allowed once, never "always": that could write a lasting
- *   allow rule into the person's own Gemini settings.
- * A prompt with no such option is cancelled. */
+ * decides: in Plan, anything that would change something is declined, so
+ * the plan stands and nothing changes; otherwise each tool is allowed once,
+ * never "always", which would write a lasting rule into the person's own
+ * Antigravity settings. A prompt with no such option is cancelled. */
 export function permissionAnswer(params, mode) {
   const options = (Array.isArray(params?.options) ? params.options : []).filter(
     (option) => typeof option?.optionId === "string",
   );
   const select = (option) =>
     option ? { outcome: { outcome: "selected", optionId: option.optionId } } : { outcome: { outcome: "cancelled" } };
-  const reject = () => select(options.find((option) => String(option.kind).startsWith("reject")));
-  const name = toolNameOf(params?.toolCall);
-  const leavesPlan = name === "exit_plan_mode" || params?.toolCall?.kind === "switch_mode";
-  if (name === "ask_user") return reject();
-  if (leavesPlan && (mode === "plan" || !mode)) return reject();
+  const call = params?.toolCall;
+  if (mode === "plan" && !buzzToolOf(call) && CHANGES.has(call?.kind))
+    return select(options.find((option) => String(option.kind).startsWith("reject")));
   return select(options.find((option) => option.kind === "allow_once"));
 }
 
-/** The models a `session/new` or `session/load` answer offers, and the one
- * the session runs on. */
-export function modelsOf(answer) {
-  const models = Array.isArray(answer?.models?.availableModels) ? answer.models.availableModels : [];
-  return {
-    current: typeof answer?.models?.currentModelId === "string" ? answer.models.currentModelId : undefined,
-    choices: models
-      .filter((model) => typeof model?.modelId === "string" && model.modelId)
-      .map((model) => ({
-        value: model.modelId,
-        name: typeof model.name === "string" && model.name ? model.name : model.modelId,
-        description: typeof model.description === "string" && model.description ? model.description : undefined,
-      })),
-  };
-}
+/** Every choice of a select config option, groups flattened. */
+export const choicesOf = (options = []) =>
+  (Array.isArray(options) ? options : []).flatMap((option) =>
+    Array.isArray(option?.options)
+      ? choicesOf(option.options)
+      : typeof option?.value === "string"
+        ? [{ value: option.value, name: option.name || option.value, description: option.description }]
+        : [],
+  );
 
-/** The approval modes a session offers, and the one it runs in. */
-export function modesOf(answer) {
-  const modes = Array.isArray(answer?.modes?.availableModes) ? answer.modes.availableModes : [];
-  return {
-    current: typeof answer?.modes?.currentModeId === "string" ? answer.modes.currentModeId : undefined,
-    ids: modes.map((mode) => mode?.id).filter((id) => typeof id === "string"),
-  };
+/** A session's config option for `category` (`model`, `thought_level`,
+ * `mode`), by its category, else its id. */
+export const optionOf = (configOptions, category) =>
+  Array.isArray(configOptions)
+    ? (configOptions.find((option) => option?.category === category) ?? configOptions.find((option) => option?.id === category))
+    : undefined;
+
+/** The plan an answer says the signed-in account is on, if it says. */
+export function tierOf(answer) {
+  const tier = answer?._meta?.antigravity?.tier;
+  return tier && typeof tier === "object" && typeof tier.name === "string"
+    ? { id: typeof tier.id === "string" ? tier.id : "", name: tier.name, ...(typeof tier.upgradeUri === "string" ? { upgradeUri: tier.upgradeUri } : {}) }
+    : undefined;
 }
 
 const count = (value) => (typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0);
 
-/** A `session/prompt` answer's token use, as Buzz's usage observations, one
- * per model the turn used. Gemini counts cached tokens inside its input and
- * thinking apart from its output; Buzz counts input without the cached part,
- * and thinking as output, as it is billed. */
-export function observationsOf(answer, fallbackModel, at = Date.now()) {
+/** A `session/prompt` answer's token use, as a Buzz usage observation.
+ * Antigravity counts cached tokens inside its input and thinking apart from
+ * its output; Buzz counts input without the cached part, and thinking as
+ * output, as it is billed. */
+export function observationsOf(answer, model, at = Date.now()) {
   const usage = answer?.usage;
   if (!usage || typeof usage !== "object") return [];
   const input = count(usage.inputTokens);
-  const cached = Math.min(count(usage.cachedReadTokens), input);
+  const cacheRead = Math.min(count(usage.cachedReadTokens), input);
+  const cacheWrite = count(usage.cachedWriteTokens);
   const output = count(usage.outputTokens) + count(usage.thoughtTokens);
   if (!input && !output) return [];
-  const perModel = (Array.isArray(answer?._meta?.quota?.model_usage) ? answer._meta.quota.model_usage : []).filter(
-    (entry) => typeof entry?.model === "string" && entry.model,
-  );
-  const tokens = (inputCount, outputCount, cache) => ({
-    input: Math.max(0, inputCount - cache),
-    output: outputCount,
-    ...(cache ? { cacheRead: cache } : {}),
-  });
-  if (perModel.length <= 1)
-    return [{ at, model: perModel[0]?.model ?? fallbackModel ?? "gemini", tokens: tokens(input, output, cached) }];
-  // Several models in one turn (Auto routes between them): each its own
-  // counts, the cache and thinking with the one that used the most input.
-  const largest = perModel.reduce((top, entry) =>
-    count(entry.token_count?.input_tokens) > count(top.token_count?.input_tokens) ? entry : top,
-  );
-  return perModel.map((entry) => {
-    const own = entry === largest;
-    const entryInput = count(entry.token_count?.input_tokens);
-    const entryOutput = count(entry.token_count?.output_tokens) + (own ? count(usage.thoughtTokens) : 0);
-    return { at, model: entry.model, tokens: tokens(entryInput, entryOutput, own ? Math.min(cached, entryInput) : 0) };
-  });
+  return [
+    {
+      at,
+      model: model || "antigravity",
+      tokens: {
+        input: Math.max(0, input - cacheRead),
+        output,
+        ...(cacheRead ? { cacheRead } : {}),
+        ...(cacheWrite ? { cacheWrite } : {}),
+      },
+    },
+  ];
 }
 
 /** A JSON-RPC error, a thrown error or anything else, as one line of text. */
@@ -181,11 +180,8 @@ export function errorText(error) {
   return String(error);
 }
 
-/** Whether an error says Gemini has no usable sign-in. */
-export const needsSignIn = (error) =>
-  /auth(entication)? required|api key is missing|not configured|login required|sign.?in|credentials|unauthenticated|invalid_grant|-32000/i.test(
-    errorText(error),
-  ) || error?.code === -32000;
+/** Whether an error says Antigravity has no usable sign-in. */
+export const needsSignIn = (error) => error?.code === -32000 || /authentication required|not (signed|logged) in/i.test(errorText(error));
 
 export const lastLines = (text, count = 6) => text.trim().split("\n").slice(-count).join("\n");
 

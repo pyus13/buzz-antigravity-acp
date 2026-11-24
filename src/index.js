@@ -1,9 +1,10 @@
-// Gemini (ACP): a Buzz harness whose agents are Gemini CLI, run in its Agent
-// Client Protocol mode with the person's own Google sign-in, so a Google AI
-// Pro or Ultra subscription pays for it instead of an API key.
+// Antigravity (ACP): a Buzz harness whose agents are Google's Antigravity
+// CLI, run as an Agent Client Protocol server (`agy acp`) with the person's
+// own Google sign-in, so a Google AI Pro or Ultra plan pays for it instead of
+// an API key.
 //
 // This file only says what the plugin gives Buzz. How agents run is in
-// runtime/, how Gemini CLI is spoken to in acp/, the views in ui/.
+// runtime/, how Antigravity CLI is spoken to in acp/, the views in ui/.
 import { PLUGIN_ID, TITLE, TYPE_ID } from "./constants.js";
 import {
   adopt,
@@ -58,7 +59,7 @@ export function apply(ctx) {
     title: TITLE,
     icon: HarnessIcon,
     description:
-      "Gemini on this computer, signed in with your own Google account. Each thread it is mentioned in is one continuing session.",
+      "Google's Antigravity agent on this computer, on your own Google AI Pro or Ultra plan. Each thread it is mentioned in is one continuing session.",
     defaults: () => ({ config: { ...DEFAULTS } }),
     summary: (agent) => readConfig(agent.config).model || TITLE,
 
@@ -74,8 +75,8 @@ export function apply(ctx) {
     adopt,
     carry,
     describeMigration,
-    exportShared: (saved) => ({ runtime: "gemini", model: readConfig(saved).model }),
-    importShared: (source) => (source.runtime === "gemini" ? { ...DEFAULTS, model: source.model ?? "" } : undefined),
+    exportShared: (saved) => ({ runtime: "antigravity", model: readConfig(saved).model }),
+    importShared: (source) => (source.runtime === "antigravity" ? { ...DEFAULTS, model: source.model ?? "" } : undefined),
     syncedSettings: { schema: SYNCED_SCHEMA, withSynced: withSyncedSettings },
 
     // Settings and views
@@ -85,7 +86,7 @@ export function apply(ctx) {
     ],
     provider: providerOf(),
     sessions: { list: (key) => runtime.sessionList(key), subscribe: runtime.subscribe },
-    // Gemini reports each turn's tokens; they are kept as they come.
+    // Antigravity reports each turn's tokens; they are kept as they come.
     usage: (agent, options) => runtime.usage.read(agent.key, options),
     models: (agent) => runtime.models(agent),
 

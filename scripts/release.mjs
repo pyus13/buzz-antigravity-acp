@@ -1,8 +1,8 @@
 // Builds the files a GitHub release attaches, into dist/:
 //
-//   gemini-acp-<version>.plugin.json  the one-file artifact for Buzz's
+//   antigravity-acp-<version>.plugin.json  the one-file artifact for Buzz's
 //                                     "Add from URL" (with its SHA-256)
-//   buzz-gemini-acp-<version>.zip     plugin/ and the README
+//   buzz-antigravity-acp-<version>.zip  plugin/ and the README
 //   SHA256SUMS                        checksums of both
 //   RELEASE_NOTES.md                  this version's notes from CHANGELOG.md
 //
@@ -50,10 +50,10 @@ const artifact = Buffer.from(
   JSON.stringify({ manifest, code, readme, iconPng: icon.toString("base64") }),
 );
 if (artifact.length > 8 * 1024 * 1024) fail("the artifact exceeds Buzz's 8 MiB");
-const artifactName = `gemini-acp-${version}.plugin.json`;
+const artifactName = `antigravity-acp-${version}.plugin.json`;
 writeFileSync(`${dist}${artifactName}`, artifact);
 
-const zipName = `buzz-gemini-acp-${version}.zip`;
+const zipName = `buzz-antigravity-acp-${version}.zip`;
 run("zip", [
   "-q",
   "-X",
@@ -83,7 +83,7 @@ writeFileSync(
 - **From this release, in Buzz:** *Add from URL* with the \`${artifactName}\` asset's link and SHA-256 \`${artifactSum}\`.
 - **From a folder:** unzip \`${zipName}\` and choose its \`plugin\` folder with *Browse*.
 
-Each computer needs Node.js 20 or later and a Google sign-in for Gemini (the plugin's **Sign in with Google**, or \`gemini\` in a terminal). The plugin downloads the pinned Gemini CLI itself on first use.
+Each computer needs Google's Antigravity CLI (\`curl -fsSL https://antigravity.google/cli/install.sh | bash\`) and a Google sign-in with your Google AI Pro or Ultra plan (the plugin's **Sign in with Google**, or \`agy\` in a terminal).
 `,
 );
 

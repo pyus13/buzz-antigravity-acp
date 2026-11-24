@@ -1,10 +1,10 @@
-// One agent on this device: its Gemini CLI process, its conversations and
-// their saved sessions, and its standalone (watch and timer) turns.
+// One agent on this device: its Antigravity CLI process, its conversations
+// and their saved sessions, and its standalone (watch and timer) turns.
 import { AcpConnection } from "../acp/connection.js";
-import { errorText, observationsOf, stepOf } from "../acp/protocol.js";
-import { SESSION_TIMEOUT_MS, TITLE } from "../constants.js";
+import { errorText, observationsOf, optionOf, stepOf } from "../acp/protocol.js";
+import { CLOSE_TIMEOUT_MS, START_TIMEOUT_MS, TITLE } from "../constants.js";
 import { readConfig } from "../config.js";
-import { applySettings, Conversation, outcomeOf, sessionParams, sessionState, wantedSettings } from "./conversation.js";
+import { applyOptions, Conversation, outcomeOf, sessionParams, turnText, wantedOptions } from "./conversation.js";
 
 const REMOVED = "This agent was removed";
 
@@ -60,9 +60,9 @@ export class AgentRuntime {
     return this.records?.[place.channelId]?.whole ? place.channelId : own;
   }
 
-  // --- the Gemini CLI process
+  // --- the Antigravity CLI process
 
-  /** The agent's Gemini CLI process, started on first use. */
+  /** The agent's Antigravity CLI process, started on first use. */
   async connect(agentHandle, settings) {
     if (this.disposed) throw new Error(REMOVED);
     if (this.connection && !this.connection.closed) return this.connection;
@@ -72,6 +72,10 @@ export class AgentRuntime {
         cwd,
         agent: agentHandle,
         permissionMode: (sessionId) => this.modeOf(sessionId),
+        onDeclined: (sessionId) => {
+          for (const conversation of this.conversations.values())
+            if (conversation.record?.sessionId === sessionId && conversation.turn) conversation.turn.declined = true;
+        },
       });
       if (this.disposed) {
         void connection.stop();
@@ -81,7 +85,7 @@ export class AgentRuntime {
         if (this.connection === connection) this.connection = undefined;
         for (const conversation of this.conversations.values())
           if (conversation.connection === connection) conversation.lose();
-        if (!stopped) console.warn(`gemini-acp: ${reason}`);
+        if (!stopped) console.warn(`antigravity-acp: ${reason}`);
         this.changed();
       });
       this.connection = connection;
@@ -207,13 +211,13 @@ export class AgentRuntime {
     if (this.disposed) return;
     await this.kit
       .reply(item.delivery.agent, item.conversation, `${TITLE} could not finish: ${error}`, { notifyOwner: true })
-      .catch((reason) => console.warn("gemini-acp: could not report a failed turn", reason));
+      .catch((reason) => console.warn("antigravity-acp: could not report a failed turn", reason));
   }
 
   // --- standalone turns
 
   /** A watch's or timer's turn, in a one-off session that joins no
-   * conversation and is let go of after. */
+   * conversation and is closed after. */
   async runOnce({ delivery, signal, prompt, key }) {
     const settings = readConfig(delivery.config);
     const agentHandle = delivery.agent;
@@ -229,7 +233,7 @@ export class AgentRuntime {
       if (signal.aborted) return { ok: false, error: "The turn was stopped before it started" };
       mcp = await this.host.serveMcp(this.tools(agentHandle, undefined, cwd));
       const system = await this.kit.systemPrompt(delivery, { scope: settings.scope, cwd, instructions: settings.instructions });
-      const created = await connection.request("session/new", sessionParams(cwd, mcp), SESSION_TIMEOUT_MS);
+      const created = await connection.request("session/new", sessionParams(cwd, mcp, system), START_TIMEOUT_MS);
       sessionId = created.sessionId;
       this.standalone.set(sessionId, settings.mode);
       this.starting -= 1;
@@ -241,19 +245,28 @@ export class AgentRuntime {
         last = label;
         delivery.step?.(step.tool, step.target);
       });
-      const state = await applySettings(connection, sessionId, sessionState(created), wantedSettings(delivery, settings, this.defaults));
+      const started = {
+        model: optionOf(created.configOptions, "model")?.currentValue,
+        effort: optionOf(created.configOptions, "thought_level")?.currentValue,
+      };
+      const options = await applyOptions(
+        connection,
+        sessionId,
+        created.configOptions,
+        wantedOptions(delivery, settings, this.defaults, started),
+      );
       const text = await prompt();
       if (text === undefined) return { ok: true };
       if (signal.aborted) return { ok: false, error: "The turn was stopped before it started" };
       const cancel = () => connection.notify("session/cancel", { sessionId });
       signal.addEventListener("abort", cancel, { once: true });
       try {
-        // Gemini CLI takes no system prompt over ACP: Buzz's leads the turn.
         const answer = await connection.request("session/prompt", {
           sessionId,
-          prompt: [{ type: "text", text: `${system}\n\n${this.kit.standalonePrompt(agentHandle, text)}` }],
+          prompt: [{ type: "text", text: turnText(this.kit.standalonePrompt(agentHandle, text), settings.mode) }],
         });
-        void this.recordUsage({ sessionId, wake: key, observations: observationsOf(answer, state.model) });
+        const model = optionOf(options, "model")?.currentValue;
+        void this.recordUsage({ sessionId, wake: key, observations: observationsOf(answer, model) });
         const outcome = outcomeOf(answer?.stopReason);
         return outcome.stopped ? { ok: false, error: "The turn was stopped" } : { ok: outcome.ok, ...(outcome.error && { error: outcome.error }) };
       } finally {
@@ -264,6 +277,8 @@ export class AgentRuntime {
     } finally {
       if (!this.standalone.delete(sessionId)) this.starting -= 1;
       unsubscribe?.();
+      if (sessionId && connection && !connection.closed && connection.sessionCapabilities.close)
+        void connection.request("session/close", { sessionId }, CLOSE_TIMEOUT_MS).catch(() => {});
       void mcp?.close().catch(() => {});
       this.idle();
     }

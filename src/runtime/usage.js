@@ -1,5 +1,5 @@
-// Each agent's token use, by Gemini session, as Buzz's usage views read it
-// (`AgentType.usage`). Gemini reports a turn's tokens when the turn ends;
+// Each agent's token use, by Antigravity session, as Buzz's usage views read it
+// (`AgentType.usage`). Antigravity reports a turn's tokens when the turn ends;
 // they are kept on this device as they come.
 import { USAGE_OBSERVATIONS, USAGE_SESSIONS } from "../constants.js";
 
@@ -59,7 +59,7 @@ export class UsageBook {
     const prior = this.writes.get(agentKey) ?? Promise.resolve();
     const write = prior
       .then(() => this.store.set(this.key(agentKey), JSON.stringify({ v: VERSION, sessions: this.held.get(agentKey) ?? {} })))
-      .catch((error) => console.warn("gemini-acp: could not save usage", error));
+      .catch((error) => console.warn("antigravity-acp: could not save usage", error));
     this.writes.set(agentKey, write);
     return write;
   }

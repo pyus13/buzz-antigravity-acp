@@ -1,5 +1,28 @@
 # Changelog
 
+## 2.0.0
+
+**Gemini (ACP) is now Antigravity (ACP).** Google replaced Gemini CLI with
+Antigravity CLI, and since June 18, 2026 Google AI Pro and Ultra plans only
+work through it. Remove Gemini (ACP) in Settings → Plugins and add this one:
+its id is new, so agents made with Gemini (ACP) need making again.
+
+- **Runs Antigravity CLI** (`agy acp --process-per-session`), signed in with
+  your Google account, so your Pro or Ultra plan pays for your agents. Install
+  it once with `curl -fsSL https://antigravity.google/cli/install.sh | bash`;
+  the plugin says so when it's missing.
+- **Every model your plan includes,** Gemini, Claude and GPT-OSS, each with its
+  own **thinking levels**.
+- **Works like Buzz's Claude:** a message sent mid-turn is steered into the
+  running turn, sessions resume and close, Compact runs Antigravity's own
+  `/compact`, and Buzz's system prompt is added to Antigravity's own.
+- **Settings → Agent setup** shows the plan your account is on, warns when it
+  has no Pro or Ultra plan (as on a Google Workspace account), and **Switch
+  account** signs in with another one.
+- **Plan** declines anything that would change a file or run a command, and
+  asks Antigravity to post its plan.
+- Permissions are now Bypass, Auto, Accept edits and Plan, as in Buzz's Claude.
+
 ## 1.0.1
 
 - **A tidy New agent dialog while signed out:** the Model row says *Not signed

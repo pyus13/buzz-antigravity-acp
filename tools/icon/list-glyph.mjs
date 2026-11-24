@@ -1,4 +1,4 @@
-// The plugin-list icon: Gemini's four-pointed sparkle with a small one beside
+// The plugin-list icon: Antigravity's rising arch with a small sparkle above
 // it, in the frosted, inflated material of Buzz's bundled plugin icons, on
 // transparency (Buzz draws the tile).
 const S = 512;
@@ -43,9 +43,9 @@ export const glyph = `<svg xmlns="http://www.w3.org/2000/svg" width="${S}" heigh
     </filter>
   </defs>
   <g filter="url(#puffy)">
+    <path d="M${C - 128} ${C + 150} C${C - 128} ${C - 60} ${C - 70} ${C - 120} ${C} ${C - 120} C${C + 70} ${C - 120} ${C + 128} ${C - 60} ${C + 128} ${C + 150}" fill="none" stroke="url(#frost)" stroke-width="78" stroke-linecap="round"/>
     <g fill="url(#frost)">
-      <path d="${sparkle(C - 18, C + 18, 156, 0.14)}"/>
-      <path d="${sparkle(C + 118, C - 118, 52, 0.16)}"/>
+      <path d="${sparkle(C + 150, C - 160, 46, 0.16)}"/>
     </g>
   </g>
 </svg>`;

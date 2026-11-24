@@ -36,7 +36,7 @@ export class DeviceDefaults {
   }
 
   /** The model and effort a turn runs with: the agent's own, else this
-   * device's default, else Gemini's own. A default effort follows only the
+   * device's default, else Antigravity's own. A default effort follows only the
    * default model it was chosen for. */
   effective(settings) {
     const { model, effort } = this.current;

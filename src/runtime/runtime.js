@@ -17,7 +17,7 @@ export class Runtime {
     this.typeKey = typeKey;
     this.listeners = new Set();
     this.agents = new Map();
-    /** Conversations with a Gemini session open, least recently used first. */
+    /** Conversations with an Antigravity session open, least recently used first. */
     this.live = new Set();
     this.sessionLists = new Map();
     this.rowLists = new Map();
@@ -144,7 +144,7 @@ export class Runtime {
       try {
         listener();
       } catch (error) {
-        console.warn("gemini-acp: a listener failed", error);
+        console.warn("antigravity-acp: a listener failed", error);
       }
     }
   }

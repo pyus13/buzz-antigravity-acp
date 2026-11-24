@@ -1,8 +1,8 @@
 {
-  "id": "local.gemini-acp",
-  "name": "Gemini (ACP)",
+  "id": "local.antigravity-acp",
+  "name": "Antigravity (ACP)",
   "apiVersion": 1,
-  "description": "Run Gemini CLI agents with your own Google account (Google AI Pro or Ultra) instead of an API key, through Gemini CLI's Agent Client Protocol mode.",
+  "description": "Run Antigravity agents on your Google AI Pro or Ultra plan instead of an API key, through Google's Antigravity CLI and the Agent Client Protocol.",
   "discovery": {
     "category": "agents",
     "tags": [
@@ -13,12 +13,11 @@
   "host": {
     "processes": [
       {
-        "id": "gemini",
-        "program": "npx",
+        "id": "agy",
+        "program": "agy",
         "args": [
-          "--yes",
-          "@google/gemini-cli@0.70.0",
-          "--acp"
+          "acp",
+          "--process-per-session"
         ]
       }
     ],

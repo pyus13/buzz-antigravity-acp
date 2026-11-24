@@ -55,7 +55,7 @@ export function fakeAgents({ kit = fakeKit(), storage = fakeStorage(), running =
     running,
     register: vi.fn(),
     types: () => [],
-    snapshot: () => ({ running: running.map((key) => ({ key, type: "local.gemini-acp/gemini-acp" })) }),
+    snapshot: () => ({ running: running.map((key) => ({ key, type: "local.antigravity-acp/antigravity-acp" })) }),
     subscribe: (listener) => {
       listeners.add(listener);
       return () => listeners.delete(listener);

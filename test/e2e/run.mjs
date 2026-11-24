@@ -1,12 +1,12 @@
 // End-to-end check of the built plugin/plugin.js outside Buzz: a stand-in
 // host (real processes, real loopback MCP over HTTP, Buzz's one-initialize
-// rule) and a stand-in harness kit, against the real Gemini CLI the manifest
-// pins, started with npx as Buzz starts it, and your real Google sign-in.
-// Uses Gemini; costs a few turns.
+// rule) and a stand-in harness kit, against the real Antigravity CLI (`agy
+// acp`, as the manifest starts it) and your real Google sign-in. Uses your
+// plan's quota; costs a few turns. E2E_TRACE=<file> records every ACP line.
 //
 //   npm run test:e2e              every scenario
-//   npm run test:e2e -- turn      one: setup, models, turn, queue, stop,
-//                                 resume, compact, control, once, failure
+//   npm run test:e2e -- turn      one: setup, models, turn, steer, stop,
+//                                 resume, compact, plan, control, once, failure
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { mkdirSync, readFileSync, realpathSync } from "node:fs";
@@ -20,17 +20,21 @@ const pluginPath = fileURLToPath(new URL("../../plugin/plugin.js", import.meta.u
 const scenario = process.argv[2] ?? "all";
 const plugin = await import(`file://${pluginPath}`);
 
+import { appendFileSync } from "node:fs";
+const traceFile = process.env.E2E_TRACE;
+const trace = (dir, data) => traceFile && appendFileSync(traceFile, data.split("\n").filter(Boolean).map((line) => `${dir} ${line}\n`).join(""));
 const log = (...args) => console.log(new Date().toISOString().slice(11, 19), ...args);
 const expand = (path) => (path.startsWith("~/") ? join(homedir(), path.slice(2)) : path);
 
 // The adapter as Buzz starts it: the manifest's process, npx and its args.
 const manifest = JSON.parse(readFileSync(fileURLToPath(new URL("../../plugin/manifest.json", import.meta.url)), "utf8"));
-const declared = manifest.host.processes.find((process) => process.id === "gemini");
+const declared = manifest.host.processes.find((process) => process.id === "agy");
 const adapter = (() => {
   try {
-    return execFileSync("sh", ["-c", `command -v ${declared.program}`]).toString().trim();
+    // As Buzz looks: ~/.local/bin first.
+    return execFileSync("sh", ["-c", `PATH="$HOME/.local/bin:$PATH" command -v ${declared.program}`]).toString().trim();
   } catch {
-    console.error(`${declared.program} was not found: install Node.js 20 or later`);
+    console.error(`${declared.program} was not found: install Antigravity CLI (curl -fsSL https://antigravity.google/cli/install.sh | bash)`);
     process.exit(1);
   }
 })();
@@ -39,7 +43,7 @@ const adapter = (() => {
 const processes = [];
 const host = {
   async spawn(id, options = {}) {
-    if (id !== "gemini") throw new Error(`undeclared process ${id}`);
+    if (id !== "agy") throw new Error(`undeclared process ${id}`);
     const env = { ...process.env };
     for (const [key, value] of Object.entries(options.env ?? {})) {
       if (value === null) delete env[key];
@@ -49,16 +53,22 @@ const host = {
       cwd: options.cwd ? expand(options.cwd) : undefined,
       env,
       stdio: ["pipe", "pipe", "pipe"],
-      // Its own process group, so a stop ends Gemini CLI's children too, as
+      // Its own process group, so a stop ends Antigravity's children too, as
       // Buzz's host does.
       detached: true,
     });
-    child.stdout.setEncoding("utf8").on("data", (d) => options.onStdout?.(d));
+    child.stdout.setEncoding("utf8").on("data", (d) => {
+      trace("<-", d);
+      options.onStdout?.(d);
+    });
     child.stderr.setEncoding("utf8").on("data", (d) => options.onStderr?.(d));
     const exited = new Promise((resolve) => child.on("exit", (code) => resolve(code)));
     processes.push(child);
     return {
-      write: (data) => new Promise((resolve, reject) => child.stdin.write(data, (e) => (e ? reject(e) : resolve()))),
+      write: (data) => {
+        trace("->", data);
+        return new Promise((resolve, reject) => child.stdin.write(data, (e) => (e ? reject(e) : resolve())));
+      },
       end: async (data) => child.stdin.end(data),
       kill: async () => {
         try {
@@ -207,14 +217,14 @@ const agentsService = {
   },
   register: (type) => (registered = type),
   types: () => [],
-  snapshot: () => ({ running: [{ key: "agent-1", type: "local.gemini-acp/gemini-acp" }] }),
+  snapshot: () => ({ running: [{ key: "agent-1", type: "local.antigravity-acp/antigravity-acp" }] }),
   subscribe: () => () => {},
 };
 const ctx = {
   react: { createElement: () => null, Fragment: "f", useState: () => [], useEffect: () => {}, useId: () => "id", cloneElement: (x) => x },
   agents: agentsService,
   host,
-  pluginOwner: { id: "local.gemini-acp" },
+  pluginOwner: { id: "local.antigravity-acp" },
   effect: (fn) => effects.push(fn()),
 };
 plugin.apply(ctx);
@@ -229,7 +239,7 @@ function delivery(content, extra = {}) {
   const d = {
     trigger: { type: "mention", event: { id, content, root: extra.root } },
     agent,
-    config: { ...registered.defaults().config, model: process.env.GEMINI_MODEL ?? "gemini-2.5-flash", ...extra.config },
+    config: { ...registered.defaults().config, model: process.env.AGY_MODEL ?? "", ...extra.config },
     signal: new AbortController().signal,
     workingUntil: (p) => (working = p),
     step: (tool, target) => receipts.push(`${tool}${target ? `:${target}` : ""}`),
@@ -257,12 +267,13 @@ const expect = (cond, what) => {
 
 const want = (name) => scenario === "all" || scenario === name;
 try {
-  // Settings → Agent setup: whether Gemini starts and is signed in.
+  // Settings → Agent setup: whether Antigravity starts and is signed in.
   const ready = await registered.provider.check();
   log("readiness", ready.readiness, ready.account ?? "", ready.attentionDescription ?? "");
-  expect(ready.readiness !== "attention" || ready.canSignIn, "Gemini CLI starts over ACP and reports its sign-in");
+  expect(ready.readiness !== "attention" || ready.canSignIn, "Antigravity CLI starts over ACP and reports its sign-in");
+  log("plan", JSON.stringify(ready.tier));
   if (ready.readiness !== "ready") {
-    console.error("Not signed in: run `npx @google/gemini-cli@0.70.0`, choose Sign in with Google, then run this again.");
+    console.error("Not signed in: run `agy` in a terminal and sign in with Google, then run this again.");
     if (scenario === "setup") process.exit();
     process.exitCode = 1;
     throw new Error("signed out");
@@ -278,27 +289,27 @@ try {
     expect(r1.ok && sent.some((s) => /alpha/i.test(s.text ?? "")), "a mention is answered through the Buzz send tool");
     const second = delivery("What word did you say last time? Answer with just that word.", { root: "ev1" });
     const r2 = await settle(second);
-    expect(r2.ok && sent.at(-1)?.conversation === "chan1/ev1" && /alpha/i.test(sent.at(-1)?.text ?? ""), "the same thread keeps its Gemini session");
-    const saved = JSON.parse(storage.get("local.gemini-acp/gemini-acp/agent-1"));
+    expect(r2.ok && sent.at(-1)?.conversation === "chan1/ev1" && /alpha/i.test(sent.at(-1)?.text ?? ""), "the same thread keeps its Antigravity session");
+    const saved = JSON.parse(storage.get("local.antigravity-acp/antigravity-acp/agent-1"));
     expect(saved.conversations["chan1/ev1"]?.sessionId && saved.conversations["chan1/ev1"].cursor === "2", "session and cursor are saved");
     const usage = await registered.usage({ key: "agent-1" }, { since: 0, signal: new AbortController().signal });
     log("usage", JSON.stringify(usage.map((u) => u.observations.at(-1))));
     expect(usage.some((u) => u.observations.length), "turns record their token use");
-    const transcript = JSON.parse(storage.get("local.gemini-acp/gemini-acp.transcript.v1:agent-1:chan1/ev1") ?? "null");
     await new Promise((r) => setTimeout(r, 2500));
-    const kept = JSON.parse(storage.get("local.gemini-acp/gemini-acp.transcript.v1:agent-1:chan1/ev1") ?? "null") ?? transcript;
+    const kept = JSON.parse(storage.get("local.antigravity-acp/antigravity-acp.transcript.v1:agent-1:chan1/ev1") ?? "null");
     log("transcript items", kept?.turns?.map((t) => t.items.map((i) => i.type).join(",")).join(" / "));
     expect(kept?.turns?.at(-1)?.items.some((i) => i.posted), "the transcript shows the posted reply");
   }
-  if (want("queue")) {
-    const long = delivery("Run the shell command `for i in 1 2 3; do echo $i; sleep 2; done`, then send me its output.", { root: "ev-q" });
+  if (want("steer")) {
+    const long = delivery("Run the shell command `for i in 1 2 3; do echo $i; sleep 2; done`, then send me its output.", { root: "ev-steer" });
     await registered.run(long.d);
-    await new Promise((r) => setTimeout(r, 4000));
-    const mid = delivery("Now send me the word 'banana'.", { root: "ev-q" });
+    await new Promise((r) => setTimeout(r, 5000));
+    const mid = delivery("Also add the word 'banana' to your reply.", { root: "ev-steer" });
     await registered.run(mid.d);
     const [a, b] = await Promise.all([long.working(), mid.working()]);
-    log("queue results", JSON.stringify(a), JSON.stringify(b));
-    expect(a.ok && b.ok && sent.some((s) => s.conversation === "chan1/ev-q" && /banana/i.test(s.text ?? "")), "a mid-turn message runs as the next turn");
+    log("steer results", JSON.stringify(a), JSON.stringify(b));
+    const steered = sent.filter((s) => s.conversation === "chan1/ev-steer");
+    expect(a.ok && b.ok && steered.some((s) => /banana/i.test(s.text ?? "")), "a mid-turn message is steered into the running turn");
   }
   if (want("stop")) {
     const long = delivery("Run the shell command `sleep 60`, then send me 'done'.", { root: "ev-stop" });
@@ -314,21 +325,36 @@ try {
     plugin.apply(ctx);
     const again = delivery("What word did you say in your first message of this thread? Just the word.", { root: "ev1" });
     const r = await settle(again);
-    expect(r.ok && /alpha/i.test(sent.at(-1)?.text ?? ""), "after a restart the thread loads its Gemini session");
+    expect(r.ok && /alpha/i.test(sent.at(-1)?.text ?? ""), "after a restart the thread resumes its Antigravity session");
   }
   if (want("compact")) {
     const place = { channelId: "chan1", root: "ev1" };
     await registered.sessionControls.run({ key: "agent-1", config: {} }, place, "compact");
     const after = delivery("What word did you say in your first message of this thread? Just the word.", { root: "ev1" });
     const r = await settle(after);
-    const saved = JSON.parse(storage.get("local.gemini-acp/gemini-acp/agent-1"));
-    expect(r.ok && /alpha/i.test(sent.at(-1)?.text ?? "") && !saved.conversations["chan1/ev1"].summary, "a compacted session carries on from its summary");
+    expect(r.ok && /alpha/i.test(sent.at(-1)?.text ?? ""), "a compacted session carries on");
+  }
+  if (want("plan")) {
+    const planned = delivery("Create a file named e2e-plan-check.txt containing 'hi' in the workspace, then send me a one-line plan of what you did.", {
+      root: "ev-plan",
+      config: { mode: "plan" },
+    });
+    const r = await settle(planned);
+    const made = (() => {
+      try {
+        readFileSync(join(expand("~/.buzz"), "e2e-plan-check.txt"));
+        return true;
+      } catch {
+        return false;
+      }
+    })();
+    expect(r.ok && !made && sent.some((s) => s.conversation === "chan1/ev-plan"), "Plan mode posts a plan and changes nothing");
   }
   if (want("control")) {
     await registered.sessionControls.run({ key: "agent-1", config: {} }, { channelId: "chan1", root: "ev1" }, "new");
     const fresh = delivery("Did you say any word to me before in this conversation? Answer yes or no only.", { root: "ev1" });
     const r = await settle(fresh);
-    expect(r.ok && /no/i.test(sent.at(-1)?.text ?? ""), "Start a new session forgets the old Gemini session");
+    expect(r.ok && /no/i.test(sent.at(-1)?.text ?? ""), "Start a new session forgets the old Antigravity session");
   }
   if (want("once")) {
     const result = await registered.runOnce({

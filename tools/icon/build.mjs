@@ -1,6 +1,6 @@
 // Draws the plugin's icons from their sources:
-//   src/assets/harness-mark.svg  beside "Gemini (ACP)" in the Harness picker
-//   src/assets/gemini-logo.svg   beside each Gemini model
+//   src/assets/harness-mark.svg      beside "Antigravity (ACP)" in the Harness picker
+//   src/assets/antigravity-logo.svg  beside each model
 //   plugin/icon.png              the Settings → Plugins tile
 // `npm run icons -- --check` fails if a committed icon differs.
 import { readFileSync, writeFileSync } from "node:fs";
@@ -13,7 +13,7 @@ const root = fileURLToPath(new URL("../..", import.meta.url));
 const check = process.argv.includes("--check");
 const outputs = [
   ["src/assets/harness-mark.svg", Buffer.from(harnessMark())],
-  ["src/assets/gemini-logo.svg", Buffer.from(modelMark())],
+  ["src/assets/antigravity-logo.svg", Buffer.from(modelMark())],
   ["plugin/icon.png", Buffer.from(new Resvg(tile).render().asPng())],
 ];
 

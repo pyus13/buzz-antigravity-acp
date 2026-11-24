@@ -2,24 +2,29 @@ import { describe, expect, it, vi } from "vitest";
 import { AcpConnection } from "../src/acp/connection.js";
 import { fakeAdapter, fakeHost, NO_REPLY } from "./fake-host.js";
 
-const initialized = { protocolVersion: 1, authMethods: [{ id: "oauth-personal" }], agentCapabilities: { loadSession: true } };
+const initialized = {
+  protocolVersion: 1,
+  agentInfo: { name: "Antigravity ACP Server" },
+  authMethods: [{ id: "oauth-personal" }],
+  agentCapabilities: { sessionCapabilities: { resume: {}, close: {} }, auth: { logout: {} }, _meta: { antigravity: { systemPrompt: { append: true } } } },
+};
 
 describe("AcpConnection", () => {
   it("starts with a scrubbed environment and completes the handshake", async () => {
     const adapter = fakeAdapter({ initialize: () => initialized });
     const host = fakeHost(adapter);
     const connection = await AcpConnection.start(host, { cwd: "/w" });
-    expect(host.spawned[0].id).toBe("gemini");
+    expect(host.spawned[0].id).toBe("agy");
     const { env } = host.spawned[0].options;
     // The person's own Google sign-in, never an API key or Vertex AI.
     expect(env.GEMINI_API_KEY).toBeNull();
     expect(env.GOOGLE_API_KEY).toBeNull();
-    expect(env.GOOGLE_GENAI_USE_VERTEXAI).toBeNull();
-    expect(env.GEMINI_CLI_TRUST_WORKSPACE).toBe("true");
-    expect(env.npm_config_update_notifier).toBe("false");
+    expect(env.AGY_ADC_AUTH).toBeNull();
     expect(host.spawned[0].options.agentCredential).toBeUndefined();
-    expect(connection.canLoad).toBe(true);
+    expect(connection.canSteer).toBe(true);
+    expect(connection.appendsSystemPrompt).toBe(true);
     expect(connection.offersGoogleLogin).toBe(true);
+    expect(connection.canLogOut).toBe(true);
   });
 
   it("binds the agent's credential when the host offers it", async () => {
@@ -43,14 +48,14 @@ describe("AcpConnection", () => {
     expect(adapter.process.killed).toBe(true);
   });
 
-  it("explains a missing Node.js", async () => {
+  it("explains a missing Antigravity CLI, with how to install it", async () => {
     const host = { spawn: async () => Promise.reject(new Error("program not found")) };
     await expect(AcpConnection.start(host, { cwd: "/w" })).rejects.toThrow(
-      /needs Node\.js 20 or later on this computer\. Install it from https:\/\/nodejs\.org/,
+      /needs Google's Antigravity CLI on this computer\. Install it in a terminal with curl -fsSL https:\/\/antigravity\.google\/cli\/install\.sh \| bash/,
     );
   });
 
-  it("routes updates to their session and answers Gemini's requests", async () => {
+  it("routes updates to their session and answers Antigravity's requests", async () => {
     const adapter = fakeAdapter({ initialize: () => initialized });
     const connection = await AcpConnection.start(fakeHost(adapter), { cwd: "/w" });
     const updates = [];
@@ -88,7 +93,7 @@ describe("AcpConnection", () => {
     expect(adapter.process.killed).toBe(true);
   });
 
-  it("times out a request Gemini never answers", async () => {
+  it("times out a request Antigravity never answers", async () => {
     vi.useFakeTimers();
     try {
       const adapter = fakeAdapter({ initialize: () => initialized, "session/new": () => NO_REPLY });
@@ -102,48 +107,5 @@ describe("AcpConnection", () => {
     } finally {
       vi.useRealTimers();
     }
-  });
-});
-
-describe("starting through npx", () => {
-  /** A host whose first `failures` starts print `stderr` and exit, as npx
-   * does when npm can't fetch Gemini CLI. */
-  function npxHost(failures, stderr) {
-    const starts = [];
-    return {
-      starts,
-      spawn: async (id, options) => {
-        starts.push(options.env);
-        if (starts.length <= failures) {
-          let exit;
-          const exited = new Promise((resolve) => (exit = resolve));
-          setTimeout(() => {
-            options.onStderr(stderr);
-            exit(1);
-          }, 1);
-          return { exited, write: async () => {}, kill: async () => exit(null) };
-        }
-        return fakeAdapter({ initialize: () => initialized }).attach(options);
-      },
-    };
-  }
-
-  it("starts from npm's cache", async () => {
-    const host = npxHost(0, "");
-    await AcpConnection.start(host, { cwd: "/w" });
-    expect(host.starts).toHaveLength(1);
-    expect(host.starts[0].npm_config_prefer_offline).toBe("true");
-  });
-
-  it("asks the registry once when the cache predates the pinned version", async () => {
-    const host = npxHost(1, "npm error code ETARGET\nnpm error notarget No matching version found for @google/gemini-cli@0.70.0.\n");
-    await AcpConnection.start(host, { cwd: "/w" });
-    expect(host.starts.map((env) => env.npm_config_prefer_offline)).toEqual(["true", "false"]);
-  });
-
-  it("says so plainly when it can't reach the registry", async () => {
-    const host = npxHost(2, "npm error code ENOTFOUND\nnpm error network request to https://registry.npmjs.org failed\n");
-    await expect(AcpConnection.start(host, { cwd: "/w" })).rejects.toThrow(/can't reach the npm registry\. Connect once; after that it starts offline/);
-    expect(host.starts).toHaveLength(1);
   });
 });

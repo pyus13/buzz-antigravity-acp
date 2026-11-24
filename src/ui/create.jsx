@@ -1,13 +1,13 @@
 // The New agent dialog's parts, as Buzz's own harnesses have them: Harness,
 // Model and Thinking in one group, the instructions below, and Set up beside
-// Harness while Gemini isn't signed in.
+// Harness while Antigravity isn't signed in.
 import { readConfig } from "../config.js";
 import { AgentInstructions, Button, PreferenceRow, row, SettingsGroup } from "./controls.jsx";
 import { ModelSelect, ThinkingSelect, useCatalog } from "./models.jsx";
 import { Fragment, h, useEffect } from "./react.js";
 import { services } from "./services.js";
 
-/** Compact model field; also the library card's. Ready once Gemini's models
+/** Compact model field; also the library card's. Ready once Antigravity's models
  * are read; a failed read holds creation, as an agent could not run. Signed
  * out, it only says so: Set up beside Harness is the way on, and reading
  * again would change nothing. */
@@ -79,7 +79,7 @@ export function Create({ config, onChange, disabled }) {
   );
 }
 
-/** Beside Harness while Gemini needs setting up: opens its setup. */
+/** Beside Harness while Antigravity needs setting up: opens its setup. */
 export function CreateAction({ disabled }) {
   const catalog = useCatalog();
   if (catalog.readiness !== "attention" || !services.openSetup) return null;

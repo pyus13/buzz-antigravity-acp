@@ -1,26 +1,29 @@
-# Gemini (ACP)
+# Antigravity (ACP)
 
-Run agents on Gemini CLI with your own Google account, so a Google AI Pro or
-Ultra subscription pays for them. No API key.
+Run agents on Google's Antigravity CLI, paid for by your own Google AI Pro or
+Ultra plan. No API key.
 
 ## Before you start
 
-On each computer, install [Node.js 20+](https://nodejs.org). Then sign in once:
-Settings → Agent setup → **Gemini (ACP)** → **Sign in with Google**, or run
-`npx @google/gemini-cli` in a terminal and choose *Sign in with Google*.
+On each computer, install Antigravity CLI:
 
-The plugin downloads its pinned Gemini CLI by itself the first time it runs.
+```sh
+curl -fsSL https://antigravity.google/cli/install.sh | bash
+```
+
+Then sign in once: Settings → Agent setup → **Antigravity (ACP)** → **Sign in
+with Google**, with the Google account that has your plan. Or run `agy` in a
+terminal and sign in there.
 
 ## Settings
 
-- **Model:** your account's Gemini models. *Default* follows Settings → Agent setup.
-- **Thinking:** always *Automatic*; Gemini CLI lets no client pick it.
+- **Model, Thinking:** the models your plan includes, and each one's thinking levels.
 - **Instructions:** what the agent does.
-- **Workspace:** the folder Gemini works in.
-- **Sessions:** one Gemini session per thread, or per channel.
+- **Workspace:** the folder Antigravity works in.
+- **Sessions:** one Antigravity session per thread, or per channel.
 - **Permissions:** *Bypass* runs every tool without asking. *Plan* only posts a plan.
 
-A message sent while Gemini works runs as the next turn. Compact starts a new
-session from Gemini's summary of the old one.
+A Google Workspace (work) account has no Pro or Ultra plan: use **Switch
+account** in Settings → Agent setup to sign in with yours.
 
-More: [github.com/pyus13/buzz-gemini-acp](https://github.com/pyus13/buzz-gemini-acp)
+More: [github.com/pyus13/buzz-antigravity-acp](https://github.com/pyus13/buzz-antigravity-acp)

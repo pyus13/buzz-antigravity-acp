@@ -26,7 +26,7 @@ const result = await build({
   minify: false,
   write: false,
   banner: {
-    js: `// Gemini (ACP) for Buzz ${version}. Built from src/ by scripts/build.mjs; edit the sources, not this file.`,
+    js: `// Antigravity (ACP) for Buzz ${version}. Built from src/ by scripts/build.mjs; edit the sources, not this file.`,
   },
 });
 
