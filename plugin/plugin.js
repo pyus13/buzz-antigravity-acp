@@ -1,4 +1,4 @@
-// Gemini (ACP) for Buzz 1.0.0. Built from src/ by scripts/build.mjs; edit the sources, not this file.
+// Gemini (ACP) for Buzz 1.0.1. Built from src/ by scripts/build.mjs; edit the sources, not this file.
 
 // src/constants.js
 var TYPE_ID = "gemini-acp";
@@ -261,7 +261,7 @@ function promptSections(text) {
 }
 
 // src/acp/connection.js
-var CLIENT_INFO = { name: "buzz-gemini-acp", version: true ? "1.0.0" : "dev" };
+var CLIENT_INFO = { name: "buzz-gemini-acp", version: true ? "1.0.1" : "dev" };
 var STALE_CACHE = /ETARGET|notarget|No matching version/;
 var OFFLINE = /ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENETUNREACH|network/i;
 var AcpConnection = class _AcpConnection {
@@ -1284,6 +1284,7 @@ var Catalog = class {
           attentionDescription: SIGN_IN_HOW,
           error: `${SIGN_IN} to choose a model.`,
           canSignIn: connection.offersGoogleLogin,
+          signedOut: true,
           models: []
         };
       }
@@ -2423,8 +2424,8 @@ function modelChoices(catalog, defaults, value, { geminiDefaultOnly = false } = 
   const chosen = options.find((option) => option.value === value) ?? options[0];
   return {
     options,
-    valueLabel: catalog.loading && !catalog.models.length ? "Loading models\u2026" : value ? chosen.label : geminiDefaultOnly ? geminiDefault : defaultName,
-    valueSuffix: !value && !geminiDefaultOnly && !catalog.loading ? " \xB7 Default" : void 0,
+    valueLabel: catalog.loading && !catalog.models.length ? "Loading models\u2026" : catalog.signedOut && !catalog.models.length ? "Not signed in" : value ? chosen.label : geminiDefaultOnly ? geminiDefault : defaultName,
+    valueSuffix: !value && !geminiDefaultOnly && !catalog.loading && catalog.models.length ? " \xB7 Default" : void 0,
     valueTitle: chosen.label
   };
 }
@@ -2459,7 +2460,7 @@ function ModelSelect({ catalog, current, onChange, disabled, variant, appearance
       appearance,
       size: appearance === "glass-ghost" ? "xs" : void 0,
       align,
-      disabled: disabled || catalog.loading && !catalog.models.length,
+      disabled: disabled || !catalog.models.length,
       onValueChange: (model) => onChange(withModel(catalog, defaults, current, model))
     }
   );
@@ -2498,7 +2499,7 @@ function CreateModel({ config, onChange, onReadyChange, disabled, modelAppearanc
       align: "end",
       onChange: (next) => onChange({ ...config, ...next })
     }
-  ), catalog.error && /* @__PURE__ */ h(Button, { size: "sm", disabled, loading: catalog.loading, onClick: catalog.retry }, "Try again")), catalog.error && /* @__PURE__ */ h("span", { role: "alert", className: "text-body-sm text-danger" }, catalog.error));
+  ), catalog.error && !catalog.signedOut && /* @__PURE__ */ h(Button, { size: "sm", disabled, loading: catalog.loading, onClick: catalog.retry }, "Try again")), catalog.error && !catalog.signedOut && /* @__PURE__ */ h("span", { role: "alert", className: "text-body-sm text-danger", style: { display: "block", maxWidth: "18rem", marginInlineStart: "auto", textAlign: "end" } }, catalog.error));
 }
 function CreateThinking({ config, onChange, disabled }) {
   const catalog = useCatalog();
@@ -2690,7 +2691,7 @@ function SettingsTab({ agent, save, settingsHost, settingsSection, settingsConte
     },
     error && /* @__PURE__ */ h("p", { ref: errorRef, tabIndex: -1, role: "alert", className: "buzz-field-error" }, error),
     unavailable && /* @__PURE__ */ h("p", { className: "text-body-sm text-muted", style: { margin: 0 } }, "Your edits stay in this form. You can save them when configuration is available again."),
-    settingsSection !== "runtime" && /* @__PURE__ */ h(Fragment, null, ["model", "effort"].filter((field) => conflicts.includes(field)).map((field) => /* @__PURE__ */ h(Conflict, { key: field, field, latest, draft, resolve, disabled: saving })), /* @__PURE__ */ h(SettingsGroup, null, settingsHost?.typeControl?.(configChanged) ?? null, /* @__PURE__ */ h(ModelSelect, { catalog, current: draft, onChange: setDraft, variant: "preference", align: "start" }), /* @__PURE__ */ h(ThinkingSelect, { catalog, current: draft, onChange: setDraft, variant: "preference" })), catalog.error && /* @__PURE__ */ h("div", { style: row }, /* @__PURE__ */ h("span", { role: "alert", className: "text-body-sm text-danger" }, catalog.error), /* @__PURE__ */ h(Button, { size: "sm", loading: catalog.loading, onClick: catalog.retry }, "Try again")), /* @__PURE__ */ h("div", { style: stack("var(--space-2)") }, conflicts.includes("instructions") && /* @__PURE__ */ h(Conflict, { field: "instructions", latest, draft, resolve, disabled: saving }), /* @__PURE__ */ h(
+    settingsSection !== "runtime" && /* @__PURE__ */ h(Fragment, null, ["model", "effort"].filter((field) => conflicts.includes(field)).map((field) => /* @__PURE__ */ h(Conflict, { key: field, field, latest, draft, resolve, disabled: saving })), /* @__PURE__ */ h(SettingsGroup, null, settingsHost?.typeControl?.(configChanged) ?? null, /* @__PURE__ */ h(ModelSelect, { catalog, current: draft, onChange: setDraft, variant: "preference", align: "start" }), /* @__PURE__ */ h(ThinkingSelect, { catalog, current: draft, onChange: setDraft, variant: "preference" })), catalog.error && /* @__PURE__ */ h("div", { style: row }, /* @__PURE__ */ h("span", { role: "alert", className: "text-body-sm text-danger" }, catalog.error), catalog.signedOut && services.openSetup ? /* @__PURE__ */ h(Button, { size: "sm", onClick: services.openSetup }, "Set up") : /* @__PURE__ */ h(Button, { size: "sm", loading: catalog.loading, onClick: catalog.retry }, "Try again")), /* @__PURE__ */ h("div", { style: stack("var(--space-2)") }, conflicts.includes("instructions") && /* @__PURE__ */ h(Conflict, { field: "instructions", latest, draft, resolve, disabled: saving }), /* @__PURE__ */ h(
       AgentInstructions,
       {
         value: draft.instructions,

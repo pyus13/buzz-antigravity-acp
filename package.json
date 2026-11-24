@@ -1,6 +1,6 @@
 {
   "name": "buzz-gemini-acp",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "A Buzz harness plugin that runs Gemini CLI through the Agent Client Protocol, signed in with your own Google account.",
   "type": "module",

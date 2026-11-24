@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.1
+
+- **A tidy New agent dialog while signed out:** the Model row says *Not signed
+  in* and no longer squeezes its label with Try again and a long message.
+  *Set up* beside Harness signs you in. Settings offers *Set up* there too.
+
 ## 1.0.0
 
 First release.

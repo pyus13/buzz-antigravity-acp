@@ -8,7 +8,9 @@ import { Fragment, h, useEffect } from "./react.js";
 import { services } from "./services.js";
 
 /** Compact model field; also the library card's. Ready once Gemini's models
- * are read; a failed read holds creation, as an agent could not run. */
+ * are read; a failed read holds creation, as an agent could not run. Signed
+ * out, it only says so: Set up beside Harness is the way on, and reading
+ * again would change nothing. */
 export function CreateModel({ config, onChange, onReadyChange, disabled, modelAppearance }) {
   const current = readConfig(config);
   const catalog = useCatalog();
@@ -26,14 +28,14 @@ export function CreateModel({ config, onChange, onReadyChange, disabled, modelAp
           align="end"
           onChange={(next) => onChange({ ...config, ...next })}
         />
-        {catalog.error && (
+        {catalog.error && !catalog.signedOut && (
           <Button size="sm" disabled={disabled} loading={catalog.loading} onClick={catalog.retry}>
             Try again
           </Button>
         )}
       </div>
-      {catalog.error && (
-        <span role="alert" className="text-body-sm text-danger">
+      {catalog.error && !catalog.signedOut && (
+        <span role="alert" className="text-body-sm text-danger" style={{ display: "block", maxWidth: "18rem", marginInlineStart: "auto", textAlign: "end" }}>
           {catalog.error}
         </span>
       )}

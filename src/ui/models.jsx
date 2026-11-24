@@ -48,8 +48,17 @@ export function modelChoices(catalog, defaults, value, { geminiDefaultOnly = fal
   const chosen = options.find((option) => option.value === value) ?? options[0];
   return {
     options,
-    valueLabel: catalog.loading && !catalog.models.length ? "Loading models…" : value ? chosen.label : geminiDefaultOnly ? geminiDefault : defaultName,
-    valueSuffix: !value && !geminiDefaultOnly && !catalog.loading ? " · Default" : undefined,
+    valueLabel:
+      catalog.loading && !catalog.models.length
+        ? "Loading models…"
+        : catalog.signedOut && !catalog.models.length
+          ? "Not signed in"
+          : value
+            ? chosen.label
+            : geminiDefaultOnly
+              ? geminiDefault
+              : defaultName,
+    valueSuffix: !value && !geminiDefaultOnly && !catalog.loading && catalog.models.length ? " · Default" : undefined,
     valueTitle: chosen.label,
   };
 }
@@ -95,7 +104,7 @@ export function ModelSelect({ catalog, current, onChange, disabled, variant, app
       appearance={appearance}
       size={appearance === "glass-ghost" ? "xs" : undefined}
       align={align}
-      disabled={disabled || (catalog.loading && !catalog.models.length)}
+      disabled={disabled || !catalog.models.length}
       onValueChange={(model) => onChange(withModel(catalog, defaults, current, model))}
     />
   );

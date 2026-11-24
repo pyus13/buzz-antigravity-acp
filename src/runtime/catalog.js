@@ -86,6 +86,7 @@ export class Catalog {
           attentionDescription: SIGN_IN_HOW,
           error: `${SIGN_IN} to choose a model.`,
           canSignIn: connection.offersGoogleLogin,
+          signedOut: true,
           models: [],
         };
       }

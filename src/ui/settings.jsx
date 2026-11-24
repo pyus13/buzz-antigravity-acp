@@ -8,6 +8,7 @@ import { AgentInstructions, Button, Field, Input, row, SaveButton, SettingsGroup
 import { ModelSelect, ThinkingSelect, useCatalog } from "./models.jsx";
 import { Fragment, h, useEffect, useId, useRef, useState } from "./react.js";
 import { Select } from "./select.jsx";
+import { services } from "./services.js";
 
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const LABELS = {
@@ -148,9 +149,15 @@ export function SettingsTab({ agent, save, settingsHost, settingsSection, settin
               <span role="alert" className="text-body-sm text-danger">
                 {catalog.error}
               </span>
-              <Button size="sm" loading={catalog.loading} onClick={catalog.retry}>
-                Try again
-              </Button>
+              {catalog.signedOut && services.openSetup ? (
+                <Button size="sm" onClick={services.openSetup}>
+                  Set up
+                </Button>
+              ) : (
+                <Button size="sm" loading={catalog.loading} onClick={catalog.retry}>
+                  Try again
+                </Button>
+              )}
             </div>
           )}
           <div style={stack("var(--space-2)")}>

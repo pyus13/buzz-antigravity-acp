@@ -241,7 +241,11 @@ describe("New agent", () => {
     await settle();
     await settle();
     expect(ready).toHaveBeenLastCalledWith(false);
-    expect(container.textContent).toContain("Sign in to Gemini to choose a model.");
+    // Set up beside Harness is the way on; nothing here crowds the row.
+    expect(named("Model").textContent).toContain("Not signed in");
+    expect(named("Model").disabled).toBe(true);
+    expect(container.textContent).not.toContain("Try again");
+    expect(container.querySelector('[role="alert"]')).toBeNull();
   });
 
   it("offers Set up beside Harness only while Gemini isn't signed in", async () => {
